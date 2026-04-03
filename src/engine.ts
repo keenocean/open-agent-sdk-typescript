@@ -457,6 +457,9 @@ export class QueryEngine {
     const context: ToolContext = {
       cwd: this.config.cwd,
       abortSignal: this.config.abortSignal,
+      provider: this.provider,
+      model: this.config.model,
+      apiType: this.provider.apiType,
     }
 
     const MAX_CONCURRENCY = parseInt(

@@ -191,6 +191,12 @@ export interface ToolInputSchema {
 export interface ToolContext {
   cwd: string
   abortSignal?: AbortSignal
+  /** Parent agent's LLM provider (inherited by subagents) */
+  provider?: import('./providers/types.js').LLMProvider
+  /** Parent agent's model ID */
+  model?: string
+  /** Parent agent's API type */
+  apiType?: import('./providers/types.js').ApiType
 }
 
 export interface ToolResult {

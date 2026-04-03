@@ -101,13 +101,15 @@ export const AgentTool: ToolDefinition = {
     const systemPrompt = agentDef?.prompt ||
       'You are a helpful assistant. Complete the given task using the available tools.'
 
-    // Resolve model and create provider for subagent
-    const subModel = input.model || process.env.CODEANY_MODEL || 'claude-sonnet-4-6'
-    const apiType = (process.env.CODEANY_API_TYPE as ApiType) || 'anthropic-messages'
-    const provider = createProvider(apiType, {
-      apiKey: process.env.CODEANY_API_KEY,
-      baseURL: process.env.CODEANY_BASE_URL,
-    })
+    // Inherit provider and model from parent agent context, fall back to env vars
+    const subModel = input.model || context.model || process.env.CODEANY_MODEL || 'claude-sonnet-4-6'
+    const provider = context.provider ?? createProvider(
+      (context.apiType || process.env.CODEANY_API_TYPE as ApiType) || 'anthropic-messages',
+      {
+        apiKey: process.env.CODEANY_API_KEY,
+        baseURL: process.env.CODEANY_BASE_URL,
+      },
+    )
 
     // Create subagent engine
     const engine = new QueryEngine({
