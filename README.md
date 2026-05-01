@@ -61,6 +61,28 @@ for await (const message of query({
 }
 ```
 
+### Token streaming
+
+Set `includePartialMessages: true` to receive provider-level deltas before the
+final assistant message:
+
+```typescript
+import { query } from "@codeany/open-agent-sdk";
+
+for await (const message of query({
+  prompt: "Write a short haiku.",
+  options: { includePartialMessages: true },
+})) {
+  if (message.type === "partial_message" && message.partial.type === "text") {
+    process.stdout.write(message.partial.text ?? "");
+  }
+}
+```
+
+`partial_message` events stream text/tool-call fragments. A final `assistant`
+event is still emitted with the complete normalized response for conversation
+history, tool execution, and compatibility with existing consumers.
+
 ### Simple blocking prompt
 
 ```typescript

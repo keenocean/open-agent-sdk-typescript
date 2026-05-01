@@ -106,6 +106,7 @@ export interface SDKPartialMessage {
   type: 'partial_message'
   partial: {
     type: 'text' | 'tool_use'
+    id?: string
     text?: string
     name?: string
     input?: string

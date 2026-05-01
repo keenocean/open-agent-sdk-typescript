@@ -11,11 +11,13 @@ import type {
   LLMProvider,
   CreateMessageParams,
   CreateMessageResponse,
+  CreateMessageStreamEvent,
   NormalizedMessageParam,
   NormalizedContentBlock,
   NormalizedTool,
   NormalizedResponseBlock,
 } from './types.js'
+import { readSseData } from './sse.js'
 
 // --------------------------------------------------------------------------
 // OpenAI-specific types (minimal, just what we need)
@@ -64,6 +66,36 @@ interface OpenAIChatResponse {
   }
 }
 
+interface OpenAIChatStreamChunk {
+  choices?: Array<{
+    index: number
+    delta?: {
+      content?: string | null
+      tool_calls?: Array<{
+        index?: number
+        id?: string
+        type?: 'function'
+        function?: {
+          name?: string
+          arguments?: string
+        }
+      }>
+    }
+    finish_reason?: 'stop' | 'length' | 'tool_calls' | 'content_filter' | string | null
+  }>
+  usage?: {
+    prompt_tokens?: number
+    completion_tokens?: number
+    total_tokens?: number
+  } | null
+}
+
+interface StreamedToolCall {
+  id?: string
+  name?: string
+  arguments: string
+}
+
 // --------------------------------------------------------------------------
 // Provider
 // --------------------------------------------------------------------------
@@ -79,19 +111,7 @@ export class OpenAIProvider implements LLMProvider {
   }
 
   async createMessage(params: CreateMessageParams): Promise<CreateMessageResponse> {
-    // Convert to OpenAI format
-    const messages = this.convertMessages(params.system, params.messages)
-    const tools = params.tools ? this.convertTools(params.tools) : undefined
-
-    const body: Record<string, any> = {
-      model: params.model,
-      max_tokens: params.maxTokens,
-      messages,
-    }
-
-    if (tools && tools.length > 0) {
-      body.tools = tools
-    }
+    const body = this.buildRequestBody(params)
 
     // Make API call
     const response = await fetch(`${this.baseURL}/chat/completions`, {
@@ -100,6 +120,7 @@ export class OpenAIProvider implements LLMProvider {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${this.apiKey}`,
       },
+      signal: params.abortSignal,
       body: JSON.stringify(body),
     })
 
@@ -116,6 +137,145 @@ export class OpenAIProvider implements LLMProvider {
 
     // Convert response back to normalized format
     return this.convertResponse(data)
+  }
+
+  async *streamMessage(
+    params: CreateMessageParams,
+  ): AsyncIterable<CreateMessageStreamEvent> {
+    const body = {
+      ...this.buildRequestBody(params),
+      stream: true,
+      stream_options: { include_usage: true },
+    }
+
+    const response = await fetch(`${this.baseURL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.apiKey}`,
+      },
+      signal: params.abortSignal,
+      body: JSON.stringify(body),
+    })
+
+    if (!response.ok) {
+      const errBody = await response.text().catch(() => '')
+      const err: any = new Error(
+        `OpenAI API error: ${response.status} ${response.statusText}: ${errBody}`,
+      )
+      err.status = response.status
+      throw err
+    }
+
+    if (!response.body) {
+      throw new Error('OpenAI API error: streaming response has no body')
+    }
+
+    const textParts: string[] = []
+    const toolCalls = new Map<number, StreamedToolCall>()
+    let finishReason: string | undefined
+    let inputTokens = 0
+    let outputTokens = 0
+
+    for await (const data of readSseData(response.body)) {
+      if (data === '[DONE]') break
+
+      const chunk = JSON.parse(data) as OpenAIChatStreamChunk
+      if (chunk.usage) {
+        inputTokens = chunk.usage.prompt_tokens ?? inputTokens
+        outputTokens = chunk.usage.completion_tokens ?? outputTokens
+      }
+
+      for (const choice of chunk.choices ?? []) {
+        if (choice.finish_reason) {
+          finishReason = choice.finish_reason
+        }
+
+        const text = choice.delta?.content
+        if (text) {
+          textParts.push(text)
+          yield { type: 'text_delta', text }
+        }
+
+        for (const toolDelta of choice.delta?.tool_calls ?? []) {
+          const index = toolDelta.index ?? 0
+          const current = toolCalls.get(index) ?? { arguments: '' }
+          const argDelta = toolDelta.function?.arguments
+          const nameDelta = toolDelta.function?.name
+
+          if (toolDelta.id) current.id = toolDelta.id
+          if (nameDelta) current.name = (current.name ?? '') + nameDelta
+          if (argDelta) current.arguments += argDelta
+          toolCalls.set(index, current)
+
+          yield {
+            type: 'tool_use_delta',
+            id: current.id,
+            name: current.name,
+            input: argDelta,
+          }
+        }
+      }
+    }
+
+    const content: NormalizedResponseBlock[] = []
+    const text = textParts.join('')
+    if (text) {
+      content.push({ type: 'text', text })
+    }
+
+    for (const toolCall of [...toolCalls.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([, value]) => value)) {
+      if (!toolCall.id || !toolCall.name) continue
+
+      let input: any
+      try {
+        input = toolCall.arguments ? JSON.parse(toolCall.arguments) : {}
+      } catch {
+        input = toolCall.arguments
+      }
+
+      content.push({
+        type: 'tool_use',
+        id: toolCall.id,
+        name: toolCall.name,
+        input,
+      })
+    }
+
+    if (content.length === 0) {
+      content.push({ type: 'text', text: '' })
+    }
+
+    yield {
+      type: 'message_stop',
+      response: {
+        content,
+        stopReason: this.mapFinishReason(finishReason || 'stop'),
+        usage: {
+          input_tokens: inputTokens,
+          output_tokens: outputTokens,
+        },
+      },
+    }
+  }
+
+  private buildRequestBody(params: CreateMessageParams): Record<string, any> {
+    const messages = this.convertMessages(params.system, params.messages)
+    const tools = params.tools ? this.convertTools(params.tools) : undefined
+
+    const body: Record<string, any> = {
+      model: params.model,
+      max_tokens: params.maxTokens,
+      messages,
+    }
+
+    if (tools && tools.length > 0) {
+      body.tools = tools
+    }
+
+    return body
   }
 
   // --------------------------------------------------------------------------
@@ -312,4 +472,5 @@ export class OpenAIProvider implements LLMProvider {
         return reason
     }
   }
+
 }
