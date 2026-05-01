@@ -1,7 +1,7 @@
 /**
- * @codeany/open-agent-sdk
+ * @keenocean/open-agent-sdk
  *
- * Open-source Agent SDK by CodeAny (https://codeany.ai).
+ * Open-source Agent SDK by Keenocean.
  * Runs the full agent loop in-process without spawning subprocesses.
  *
  * Features:
