@@ -48,7 +48,6 @@ for await (const message of query({
   prompt: "Read package.json and tell me the project name.",
   options: {
     allowedTools: ["Read", "Glob"],
-    permissionMode: "bypassPermissions",
   },
 })) {
   if (message.type === "assistant") {
@@ -118,7 +117,18 @@ The `apiType` is auto-detected from model name — models containing `gpt-`, `o1
 ```typescript
 import { createAgent } from "@keenocean/open-agent-sdk";
 
-const agent = createAgent({ maxTurns: 5 });
+const agent = createAgent({
+  maxTurns: 5,
+  tools: ["Read", "Write"],
+  permissionMode: "acceptEdits",
+  sandbox: {
+    enabled: true,
+    filesystem: {
+      allowRead: [".", "/tmp"],
+      allowWrite: [".", "/tmp"],
+    },
+  },
+});
 
 const r1 = await agent.prompt(
   'Create a file /tmp/hello.txt with "Hello World"',
@@ -150,7 +160,15 @@ const server = createSdkMcpServer({ name: "weather", tools: [getWeather] });
 
 for await (const msg of query({
   prompt: "What is the weather in Tokyo?",
-  options: { mcpServers: { weather: server } },
+  options: {
+    mcpServers: { weather: server },
+    allowedTools: ["mcp__weather__*"],
+    sandbox: { enabled: false },
+    canUseTool: async (tool) =>
+      tool.name.startsWith("mcp__weather__")
+        ? { behavior: "allow" }
+        : { behavior: "deny", message: "Only weather MCP tools are allowed" },
+  },
 })) {
   if (msg.type === "result")
     console.log(`Done: $${msg.total_cost_usd?.toFixed(4)}`);
@@ -162,7 +180,7 @@ for await (const msg of query({
 ```typescript
 import {
   createAgent,
-  getAllBaseTools,
+  getSafeBaseTools,
   defineTool,
 } from "@keenocean/open-agent-sdk";
 
@@ -175,15 +193,75 @@ const calculator = defineTool({
     required: ["expression"],
   },
   isReadOnly: true,
+  sandboxAware: true,
   async call(input) {
+    if (!/^[\d+\-*/().\s%]+$/.test(input.expression)) {
+      return { data: "Error: only arithmetic expressions are supported", is_error: true };
+    }
     const result = Function(`'use strict'; return (${input.expression})`)();
     return `${input.expression} = ${result}`;
   },
 });
 
-const agent = createAgent({ tools: [...getAllBaseTools(), calculator] });
+const agent = createAgent({ tools: [...getSafeBaseTools(), calculator] });
 const r = await agent.prompt("Calculate 2**10 * 3");
 console.log(r.text);
+```
+
+### Security defaults
+
+The SDK is safe-by-default at the tool boundary:
+
+- `createAgent()` exposes only `Read`, `Glob`, and `Grep` unless you pass `tools`.
+- The default agent enables the SDK app-level sandbox and limits file reads to `cwd`.
+- Custom tools must set `sandboxAware: true` to run while SDK sandbox guards are enabled.
+- The default `permissionMode` is `default`, which allows read-only tools and blocks writes, shell commands, subagents, schedulers, non-read-only MCP tools, and other side-effecting tools.
+- `maxToolCalls` defaults to `50` per query. The cap counts model-requested `tool_use` blocks, including calls blocked by safety checks.
+- To opt into every built-in tool, pass `tools: { type: "preset", preset: "default" }` and still provide a host approval policy with `canUseTool` or an explicit `permissionMode`.
+- Per-query `tools` overrides cannot expand beyond the constructor tool pool unless `allowQueryToolExpansion: true` is set on the agent.
+- `allowedTools` and `disallowedTools` support exact names, wildcard names such as `mcp__filesystem__*`, and permission-style entries such as `Bash(git:*)` for tool-pool matching.
+
+The SDK sandbox adds application-level guards for filesystem and network access,
+but it is not a trusted OS sandbox. The TypeScript SDK does not bundle an OS-level
+sandbox runtime. The default agent enables this app-level sandbox; pass
+`sandbox: { enabled: false }` only when your host has its own boundary. Set
+`sandbox.failIfUnavailable: true` when your host requires a trusted sandbox and
+wants the query to fail closed if one is unavailable. By default, sandboxed reads
+are limited to `cwd`, and sandboxed writes are limited to `cwd` plus the OS temp
+directory unless you set `filesystem.allowRead` or `filesystem.allowWrite`.
+Only mark custom tools as `sandboxAware` when they do not touch protected host
+resources or when they enforce their own filesystem/network boundary.
+
+```typescript
+const agent = createAgent({
+  sandbox: {
+    enabled: true,
+    failIfUnavailable: true,
+  },
+});
+```
+
+With SDK sandbox mode enabled, `Bash` and MCP tools are blocked because the SDK
+cannot confine external processes. Running shell commands requires all of:
+`dangerouslyDisableSandbox: true` in the tool input,
+`sandbox.allowUnsandboxedCommands: true`, and explicit host approval.
+External MCP transports are not connected while SDK sandbox mode is enabled.
+Low-level `connectMCPServer()` tool wrappers also require an explicit sandbox
+context and only execute when `sandbox.enabled` is `false`.
+Direct calls to exported SDK tool definitions are a low-level API: built-in
+tools require an explicit sandbox context, and external-execution tools also
+require a direct `toolCallBudget` plus host approval where applicable.
+
+For complex tasks, raise `maxToolCalls` deliberately and pair it with
+`maxBudgetUsd`. Subagents inherit the same tool-call budget instead of receiving
+a fresh counter.
+
+```typescript
+const agent = createAgent({
+  maxTurns: 30,
+  maxToolCalls: 200,
+  maxBudgetUsd: 2,
+});
 ```
 
 ### Skills
@@ -214,8 +292,14 @@ registerSkill({
 
 console.log(`${getAllSkills().length} skills registered`);
 
-// The model can invoke skills via the Skill tool
-const agent = createAgent();
+// The model can invoke skills via the Skill tool when explicitly enabled
+const agent = createAgent({
+  tools: ["Skill"],
+  canUseTool: async (tool) =>
+    tool.name === "Skill"
+      ? { behavior: "allow" }
+      : { behavior: "deny", message: "Only Skill is allowed" },
+});
 const result = await agent.prompt('Use the "explain" skill to explain git rebase');
 console.log(result.text);
 ```
@@ -252,12 +336,18 @@ const hooks = createHookRegistry({
 import { createAgent } from "@keenocean/open-agent-sdk";
 
 const agent = createAgent({
+  sandbox: { enabled: false },
+  allowedTools: ["mcp__filesystem__*"],
   mcpServers: {
     filesystem: {
       command: "npx",
       args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
     },
   },
+  canUseTool: async (tool) =>
+    tool.name.startsWith("mcp__filesystem__")
+      ? { behavior: "allow" }
+      : { behavior: "deny", message: "Demo only allows filesystem MCP tools" },
 });
 
 const result = await agent.prompt("List files in /tmp");
@@ -296,7 +386,6 @@ for await (const msg of query({
   prompt: "Review the code in src/ for best practices.",
   options: {
     allowedTools: ["Read", "Glob", "Grep"],
-    permissionMode: "dontAsk",
   },
 })) {
   // ...
@@ -323,6 +412,7 @@ npx tsx examples/web/server.ts
 | `tool(name, desc, schema, handler)`   | Create a tool with Zod schema validation                       |
 | `createSdkMcpServer({ name, tools })` | Bundle tools into an in-process MCP server                     |
 | `defineTool(config)`                  | Low-level tool definition helper                               |
+| `getSafeBaseTools()`                  | Get the safe default built-in tools: `Read`, `Glob`, `Grep`    |
 | `getAllBaseTools()`                   | Get all 35+ built-in tools                                     |
 | `registerSkill(definition)`           | Register a custom skill                                        |
 | `getAllSkills()`                       | Get all registered skills                                      |
@@ -356,13 +446,15 @@ npx tsx examples/web/server.ts
 | `cwd`                | `string`                                | `process.cwd()`        | Working directory                                                    |
 | `systemPrompt`       | `string`                                | —                      | System prompt override                                               |
 | `appendSystemPrompt` | `string`                                | —                      | Append to default system prompt                                      |
-| `tools`              | `ToolDefinition[]`                      | All built-in           | Available tools                                                      |
+| `tools`              | `ToolDefinition[]` / `string[]` / preset | `Read`, `Glob`, `Grep` | Available tools; use `{ type: 'preset', preset: 'default' }` for all built-ins |
+| `allowQueryToolExpansion` | `boolean`                         | `false`                | Allow per-query `tools` overrides to expand beyond the constructor tool pool |
 | `allowedTools`       | `string[]`                              | —                      | Tool allow-list                                                      |
 | `disallowedTools`    | `string[]`                              | —                      | Tool deny-list                                                       |
-| `permissionMode`     | `string`                                | `bypassPermissions`    | `default` / `acceptEdits` / `dontAsk` / `bypassPermissions` / `plan` |
+| `permissionMode`     | `string`                                | `default`              | `default` / `acceptEdits` / `dontAsk` / `bypassPermissions` / `plan` |
 | `canUseTool`         | `function`                              | —                      | Custom permission callback                                           |
 | `maxTurns`           | `number`                                | `10`                   | Max agentic turns                                                    |
 | `maxBudgetUsd`       | `number`                                | —                      | Spending cap                                                         |
+| `maxToolCalls`       | `number`                                | `50`                   | Hard cap on model-requested tool calls; use `Infinity` to opt out intentionally |
 | `thinking`           | `ThinkingConfig`                        | `{ type: 'adaptive' }` | Extended thinking                                                    |
 | `effort`             | `string`                                | `high`                 | Reasoning effort: `low` / `medium` / `high` / `max`                  |
 | `mcpServers`         | `Record<string, McpServerConfig>`       | —                      | MCP server connections                                               |
@@ -373,7 +465,7 @@ npx tsx examples/web/server.ts
 | `persistSession`     | `boolean`                               | `true`                 | Persist session to disk                                              |
 | `sessionId`          | `string`                                | auto                   | Explicit session ID                                                  |
 | `outputFormat`       | `{ type: 'json_schema', schema }`       | —                      | Structured output                                                    |
-| `sandbox`            | `SandboxSettings`                       | —                      | Filesystem/network sandbox                                           |
+| `sandbox`            | `SandboxSettings`                       | —                      | App-level filesystem/network guard; not a trusted OS sandbox         |
 | `settingSources`     | `SettingSource[]`                       | —                      | Load AGENT.md, project settings                                      |
 | `env`                | `Record<string, string>`                | —                      | Environment variables                                                |
 | `abortController`    | `AbortController`                       | —                      | Cancellation controller                                              |
@@ -389,6 +481,9 @@ npx tsx examples/web/server.ts
 | `CODEANY_AUTH_TOKEN` | Alternative auth token                                   |
 
 ## Built-in tools
+
+Only `Read`, `Glob`, and `Grep` are exposed by default. All other built-ins
+require an explicit `tools` option and host approval.
 
 | Tool                                       | Description                                  |
 | ------------------------------------------ | -------------------------------------------- |

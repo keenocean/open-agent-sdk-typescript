@@ -79,6 +79,7 @@ export type {
 export {
   // Registry
   getAllBaseTools,
+  getSafeBaseTools,
   filterTools,
   assembleToolPool,
 
@@ -384,6 +385,7 @@ export type {
   ToolInputSchema,
   ToolContext,
   ToolResult,
+  ToolCallBudget,
 
   // Permission types
   PermissionMode,
@@ -415,6 +417,7 @@ export type {
   SandboxSettings,
   SandboxNetworkConfig,
   SandboxFilesystemConfig,
+  SandboxRuntimePolicy,
 
   // Output format
   OutputFormat,

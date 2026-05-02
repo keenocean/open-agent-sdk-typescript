@@ -3,6 +3,10 @@
  */
 
 import type { ToolDefinition, McpServerConfig, ToolContext, ToolResult } from '../types.js'
+import {
+  claimDirectToolCallBudget,
+  getSandboxToolBlockReason,
+} from '../utils/sandbox.js'
 
 export interface MCPConnection {
   name: string
@@ -93,7 +97,7 @@ function createMCPToolDefinition(
 ): ToolDefinition {
   const toolName = `mcp__${serverName}__${mcpTool.name}`
 
-  return {
+  const toolDefinition: ToolDefinition = {
     name: toolName,
     description: mcpTool.description || `MCP tool: ${mcpTool.name} from ${serverName}`,
     inputSchema: mcpTool.inputSchema || { type: 'object', properties: {} },
@@ -103,7 +107,47 @@ function createMCPToolDefinition(
     async prompt() {
       return mcpTool.description || ''
     },
-    async call(input: any): Promise<ToolResult> {
+    async call(input: any, context?: ToolContext): Promise<ToolResult> {
+      const sandboxBlockReason = context?.sandbox
+        ? getSandboxToolBlockReason(toolName, input, context.sandbox)
+        : `MCP tool "${toolName}" requires an explicit sandbox context. Pass sandbox.enabled=false only when the host provides its own boundary.`
+      if (sandboxBlockReason) {
+        return {
+          type: 'tool_result',
+          tool_use_id: '',
+          content: sandboxBlockReason,
+          is_error: true,
+        }
+      }
+      if (!context?.__sdkInternalToolCall) {
+        const budgetBlockReason = claimDirectToolCallBudget(context?.toolCallBudget, toolName)
+        if (budgetBlockReason) {
+          return {
+            type: 'tool_result',
+            tool_use_id: '',
+            content: budgetBlockReason,
+            is_error: true,
+          }
+        }
+        if (!context?.canUseTool) {
+          return {
+            type: 'tool_result',
+            tool_use_id: '',
+            content: `MCP tool "${toolName}" requires explicit host approval through context.canUseTool.`,
+            is_error: true,
+          }
+        }
+        const permission = await context.canUseTool(toolDefinition, input)
+        if (permission.behavior === 'deny') {
+          return {
+            type: 'tool_result',
+            tool_use_id: '',
+            content: permission.message || `MCP tool "${toolName}" was denied by host approval.`,
+            is_error: true,
+          }
+        }
+      }
+
       try {
         const result = await client.callTool({
           name: mcpTool.name,
@@ -140,6 +184,7 @@ function createMCPToolDefinition(
       }
     },
   }
+  return toolDefinition
 }
 
 /**

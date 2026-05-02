@@ -61,6 +61,11 @@ async function main() {
   const agent = createAgent({
     model: process.env.CODEANY_MODEL || 'claude-sonnet-4-6',
     maxTurns: 5,
+    tools: ['Skill'],
+    canUseTool: async (tool) =>
+      tool.name === 'Skill'
+        ? { behavior: 'allow' }
+        : { behavior: 'deny', message: 'Example only allows the Skill tool' },
   })
 
   for await (const event of agent.query(

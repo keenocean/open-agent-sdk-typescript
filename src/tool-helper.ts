@@ -20,6 +20,11 @@
 import { z, type ZodRawShape, type ZodObject } from 'zod'
 import { zodToJsonSchema } from 'zod-to-json-schema'
 import type { ToolDefinition, ToolResult, ToolContext } from './types.js'
+import {
+  claimDirectToolCallBudget,
+  getSandboxToolBlockReason,
+  requireSandboxContext,
+} from './utils/sandbox.js'
 
 /**
  * Tool annotations (MCP standard).
@@ -52,6 +57,7 @@ export interface SdkMcpToolDefinition<T extends ZodRawShape = ZodRawShape> {
   inputSchema: ZodObject<T>
   handler: (args: z.infer<ZodObject<T>>, extra: unknown) => Promise<CallToolResult>
   annotations?: ToolAnnotations
+  sandboxAware?: boolean
 }
 
 /**
@@ -64,7 +70,7 @@ export function tool<T extends ZodRawShape>(
   description: string,
   inputSchema: T,
   handler: (args: z.infer<ZodObject<T>>, extra: unknown) => Promise<CallToolResult>,
-  extras?: { annotations?: ToolAnnotations },
+  extras?: { annotations?: ToolAnnotations; sandboxAware?: boolean },
 ): SdkMcpToolDefinition<T> {
   return {
     name,
@@ -72,17 +78,21 @@ export function tool<T extends ZodRawShape>(
     inputSchema: z.object(inputSchema),
     handler,
     annotations: extras?.annotations,
+    sandboxAware: extras?.sandboxAware,
   }
 }
 
 /**
  * Convert an SdkMcpToolDefinition to a ToolDefinition for the engine.
  */
-export function sdkToolToToolDefinition(sdkTool: SdkMcpToolDefinition<any>): ToolDefinition {
+export function sdkToolToToolDefinition(
+  sdkTool: SdkMcpToolDefinition<any>,
+  toolName = sdkTool.name,
+): ToolDefinition {
   const jsonSchema = zodToJsonSchema(sdkTool.inputSchema, { target: 'openApi3' }) as any
 
-  return {
-    name: sdkTool.name,
+  const toolDefinition: ToolDefinition = {
+    name: toolName,
     description: sdkTool.description,
     inputSchema: {
       type: 'object',
@@ -90,10 +100,63 @@ export function sdkToolToToolDefinition(sdkTool: SdkMcpToolDefinition<any>): Too
       required: jsonSchema.required || [],
     },
     isReadOnly: () => sdkTool.annotations?.readOnlyHint ?? false,
+    sandboxAware: () => sdkTool.sandboxAware ?? false,
     isConcurrencySafe: () => sdkTool.annotations?.readOnlyHint ?? false,
     isEnabled: () => true,
     async prompt() { return sdkTool.description },
-    async call(input: any, _context: ToolContext): Promise<ToolResult> {
+    async call(input: any, context: ToolContext): Promise<ToolResult> {
+      const contextBlockReason = requireSandboxContext(context?.sandbox, toolName)
+      if (contextBlockReason) {
+        return {
+          type: 'tool_result',
+          tool_use_id: '',
+          content: contextBlockReason,
+          is_error: true,
+        }
+      }
+      const sandboxBlockReason = getSandboxToolBlockReason(toolName, input, context.sandbox, toolDefinition)
+      if (sandboxBlockReason) {
+        return {
+          type: 'tool_result',
+          tool_use_id: '',
+          content: sandboxBlockReason,
+          is_error: true,
+        }
+      }
+      if (!context.__sdkInternalToolCall) {
+        const budgetBlockReason = claimDirectToolCallBudget(context.toolCallBudget, toolName)
+        if (budgetBlockReason) {
+          return {
+            type: 'tool_result',
+            tool_use_id: '',
+            content: budgetBlockReason,
+            is_error: true,
+          }
+        }
+        if (!toolDefinition.isReadOnly?.()) {
+          if (!context.canUseTool) {
+            return {
+              type: 'tool_result',
+              tool_use_id: '',
+              content: `Tool "${toolName}" requires explicit host approval through context.canUseTool.`,
+              is_error: true,
+            }
+          }
+          const permission = await context.canUseTool(toolDefinition, input)
+          if (permission.behavior === 'deny') {
+            return {
+              type: 'tool_result',
+              tool_use_id: '',
+              content: permission.message || `Tool "${toolName}" was denied by host approval.`,
+              is_error: true,
+            }
+          }
+          if (permission.updatedInput !== undefined) {
+            input = permission.updatedInput
+          }
+        }
+      }
+
       try {
         const parsed = sdkTool.inputSchema.parse(input)
         const result = await sdkTool.handler(parsed, {})
@@ -124,4 +187,5 @@ export function sdkToolToToolDefinition(sdkTool: SdkMcpToolDefinition<any>): Too
       }
     },
   }
+  return toolDefinition
 }

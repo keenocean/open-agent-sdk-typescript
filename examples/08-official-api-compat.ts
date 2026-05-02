@@ -15,8 +15,10 @@ async function main() {
   for await (const message of query({
     prompt: 'What files are in this directory? Be brief.',
     options: {
+      tools: ['Bash', 'Glob'],
       allowedTools: ['Bash', 'Glob'],
       permissionMode: 'bypassPermissions',
+      sandbox: { enabled: false },
     },
   })) {
     const msg = message as any

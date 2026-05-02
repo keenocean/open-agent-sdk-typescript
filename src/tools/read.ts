@@ -5,6 +5,11 @@
 import { readFile, stat } from 'fs/promises'
 import { resolve } from 'path'
 import { defineTool } from './types.js'
+import {
+  checkSandboxRead,
+  claimDirectToolCallBudget,
+  requireSandboxContext,
+} from '../utils/sandbox.js'
 
 export const FileReadTool = defineTool({
   name: 'Read',
@@ -28,9 +33,24 @@ export const FileReadTool = defineTool({
     required: ['file_path'],
   },
   isReadOnly: true,
+  sandboxAware: true,
   isConcurrencySafe: true,
   async call(input, context) {
+    const contextBlockReason = requireSandboxContext(context.sandbox, 'Read')
+    if (contextBlockReason) {
+      return { data: contextBlockReason, is_error: true }
+    }
+    if (!context.__sdkInternalToolCall) {
+      const budgetBlockReason = claimDirectToolCallBudget(context.toolCallBudget, 'Read')
+      if (budgetBlockReason) {
+        return { data: budgetBlockReason, is_error: true }
+      }
+    }
     const filePath = resolve(context.cwd, input.file_path)
+    const sandboxBlockReason = checkSandboxRead(context.sandbox, context.cwd, filePath)
+    if (sandboxBlockReason) {
+      return { data: sandboxBlockReason, is_error: true }
+    }
 
     try {
       const fileStat = await stat(filePath)

@@ -14,6 +14,9 @@ async function main() {
   const agent = createAgent({
     model: process.env.CODEANY_MODEL || 'claude-sonnet-4-6',
     maxTurns: 5,
+    tools: ['Bash'],
+    permissionMode: 'bypassPermissions',
+    sandbox: { enabled: false },
   })
 
   const result = await agent.prompt(

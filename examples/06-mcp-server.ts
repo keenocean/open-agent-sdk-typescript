@@ -18,12 +18,18 @@ async function main() {
   const agent = createAgent({
     model: process.env.CODEANY_MODEL || 'claude-sonnet-4-6',
     maxTurns: 10,
+    sandbox: { enabled: false },
+    allowedTools: ['mcp__filesystem__*'],
     mcpServers: {
       filesystem: {
         command: 'npx',
         args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'],
       },
     },
+    canUseTool: async (tool) =>
+      tool.name.startsWith('mcp__filesystem__')
+        ? { behavior: 'allow' }
+        : { behavior: 'deny', message: 'Example only allows filesystem MCP tools' },
   })
 
   console.log('Connecting to MCP filesystem server...\n')

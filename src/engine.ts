@@ -19,6 +19,7 @@ import type {
   ToolResult,
   ToolContext,
   TokenUsage,
+  ToolCallBudget,
 } from './types.js'
 import type {
   LLMProvider,
@@ -45,6 +46,10 @@ import {
 } from './utils/retry.js'
 import { getSystemContext, getUserContext } from './utils/context.js'
 import { normalizeMessagesForAPI } from './utils/messages.js'
+import {
+  getSandboxStartupError,
+  getSandboxToolBlockReason,
+} from './utils/sandbox.js'
 import type { HookRegistry, HookInput, HookOutput } from './hooks.js'
 
 // ============================================================================
@@ -69,6 +74,37 @@ interface ToolUseBlock {
   id: string
   name: string
   input: any
+}
+
+function isUnsandboxedBashRequest(block: ToolUseBlock): boolean {
+  return block.name === 'Bash' &&
+    typeof block.input === 'object' &&
+    block.input !== null &&
+    (block.input as { dangerouslyDisableSandbox?: unknown }).dangerouslyDisableSandbox === true
+}
+
+const DEFAULT_MAX_TOOL_CALLS = 50
+
+function createToolCallBudget(maxToolCalls?: number): ToolCallBudget {
+  return {
+    maxToolCalls: normalizeMaxToolCalls(maxToolCalls),
+    toolCallCount: 0,
+    blockedToolCallCount: 0,
+    exceeded: false,
+  }
+}
+
+function normalizeMaxToolCalls(maxToolCalls: number | undefined): number | undefined {
+  if (maxToolCalls === undefined) return DEFAULT_MAX_TOOL_CALLS
+  if (maxToolCalls === Number.POSITIVE_INFINITY) return undefined
+  if (!Number.isFinite(maxToolCalls)) return DEFAULT_MAX_TOOL_CALLS
+  return Math.max(0, Math.floor(maxToolCalls))
+}
+
+function normalizeMaxBudgetUsd(maxBudgetUsd: number | undefined): number | undefined {
+  if (maxBudgetUsd === undefined) return undefined
+  if (!Number.isFinite(maxBudgetUsd) || maxBudgetUsd <= 0) return 0
+  return maxBudgetUsd
 }
 
 // ============================================================================
@@ -129,6 +165,23 @@ async function buildSystemPrompt(config: QueryEngineConfig): Promise<string> {
   // Working directory
   parts.push(`\n# Working Directory\n${config.cwd}`)
 
+  const maxToolCalls = config.toolCallBudget?.maxToolCalls ??
+    normalizeMaxToolCalls(config.maxToolCalls)
+  if (maxToolCalls !== undefined) {
+    const usedToolCalls = config.toolCallBudget?.toolCallCount ?? 0
+    parts.push(
+      `\n# Tool Call Budget\nYou have ${Math.max(0, maxToolCalls - usedToolCalls)} tool calls remaining in this run.`,
+    )
+  }
+
+  if (config.sandbox?.enabled) {
+    parts.push(
+      '\n# Sandbox\n' +
+        'SDK sandbox mode is enabled, but it is an application-level guard only and not a trusted OS sandbox. ' +
+        'Shell commands and MCP tools are unavailable unless the host explicitly opts into unsandboxed execution.',
+    )
+  }
+
   if (config.appendSystemPrompt) {
     parts.push('\n' + config.appendSystemPrompt)
   }
@@ -151,6 +204,7 @@ export class QueryEngine {
   private sessionId: string
   private apiTimeMs = 0
   private hookRegistry?: HookRegistry
+  private toolCallBudget: ToolCallBudget
 
   constructor(config: QueryEngineConfig) {
     this.config = config
@@ -158,6 +212,8 @@ export class QueryEngine {
     this.compactState = createAutoCompactState()
     this.sessionId = config.sessionId || crypto.randomUUID()
     this.hookRegistry = config.hookRegistry
+    this.toolCallBudget = config.toolCallBudget ?? createToolCallBudget(config.maxToolCalls)
+    this.config.toolCallBudget = this.toolCallBudget
   }
 
   /**
@@ -209,6 +265,24 @@ export class QueryEngine {
       return
     }
 
+    const sandboxStartupError = getSandboxStartupError(this.config.sandbox)
+    if (sandboxStartupError) {
+      yield {
+        type: 'result',
+        subtype: 'error_sandbox_unavailable',
+        is_error: true,
+        usage: this.totalUsage,
+        num_turns: 0,
+        cost: 0,
+        total_cost_usd: 0,
+        tool_calls: this.toolCallBudget.toolCallCount,
+        max_tool_calls: this.toolCallBudget.maxToolCalls,
+        blocked_tool_calls: this.toolCallBudget.blockedToolCallCount,
+        errors: [sandboxStartupError],
+      }
+      return
+    }
+
     // Add user message
     this.messages.push({ role: 'user', content: prompt as any })
 
@@ -227,7 +301,15 @@ export class QueryEngine {
       model: this.config.model,
       cwd: this.config.cwd,
       mcp_servers: [],
-      permission_mode: 'bypassPermissions',
+      permission_mode: this.config.permissionMode ?? 'default',
+      warnings: this.config.sandbox?.warnings,
+      sandbox: this.config.sandbox
+        ? {
+            enabled: this.config.sandbox.enabled,
+            trusted: false,
+            unavailable_reason: this.config.sandbox.unavailableReason,
+          }
+        : undefined,
     } as SDKMessage
 
     // Agentic loop
@@ -235,12 +317,13 @@ export class QueryEngine {
     let budgetExceeded = false
     let maxOutputRecoveryAttempts = 0
     const MAX_OUTPUT_RECOVERY = 3
+    const maxBudgetUsd = normalizeMaxBudgetUsd(this.config.maxBudgetUsd)
 
     while (turnsRemaining > 0) {
       if (this.config.abortSignal?.aborted) break
 
       // Check budget
-      if (this.config.maxBudgetUsd && this.totalCost >= this.config.maxBudgetUsd) {
+      if (maxBudgetUsd !== undefined && this.totalCost >= maxBudgetUsd) {
         budgetExceeded = true
         break
       }
@@ -413,6 +496,8 @@ export class QueryEngine {
         })),
       })
 
+      if (this.toolCallBudget.exceeded) break
+
       if (response.stopReason === 'end_turn') break
     }
 
@@ -425,9 +510,11 @@ export class QueryEngine {
     // Yield enriched final result
     const endSubtype = budgetExceeded
       ? 'error_max_budget_usd'
-      : turnsRemaining <= 0
-        ? 'error_max_turns'
-        : 'success'
+      : this.toolCallBudget.exceeded
+        ? 'error_max_tool_calls'
+        : turnsRemaining <= 0
+          ? 'error_max_turns'
+          : 'success'
 
     yield {
       type: 'result',
@@ -439,6 +526,10 @@ export class QueryEngine {
       duration_api_ms: Math.round(this.apiTimeMs),
       usage: this.totalUsage,
       model_usage: { [this.config.model]: { input_tokens: this.totalUsage.input_tokens, output_tokens: this.totalUsage.output_tokens } },
+      tool_calls: this.toolCallBudget.toolCallCount,
+      max_tool_calls: this.toolCallBudget.maxToolCalls,
+      blocked_tool_calls: this.toolCallBudget.blockedToolCallCount,
+      can_continue: this.toolCallBudget.exceeded || undefined,
       cost: this.totalCost,
     }
   }
@@ -523,26 +614,36 @@ export class QueryEngine {
       provider: this.provider,
       model: this.config.model,
       apiType: this.provider.apiType,
+      sandbox: this.config.sandbox,
+      permissionMode: this.config.permissionMode,
+      canUseTool: this.config.canUseTool,
+      toolCallBudget: this.toolCallBudget,
+      approvedUnsandboxedBashToolUseIds: new Set(),
     }
 
     const MAX_CONCURRENCY = parseInt(
       process.env.AGENT_SDK_MAX_TOOL_CONCURRENCY || '10',
     )
 
-    // Partition into read-only (concurrent) and mutation (serial)
-    const readOnly: Array<{ block: ToolUseBlock; tool?: ToolDefinition }> = []
-    const mutations: Array<{ block: ToolUseBlock; tool?: ToolDefinition }> = []
+    // Partition into read-only (concurrent) and mutation (serial), while
+    // preserving a result slot for every model-requested tool_use block.
+    const readOnly: Array<{ index: number; block: ToolUseBlock; tool?: ToolDefinition }> = []
+    const mutations: Array<{ index: number; block: ToolUseBlock; tool?: ToolDefinition }> = []
+    const results = new Array<ToolResult & { tool_name?: string }>(toolUseBlocks.length)
 
-    for (const block of toolUseBlocks) {
+    for (const [index, block] of toolUseBlocks.entries()) {
+      if (!this.claimToolCall()) {
+        results[index] = this.createMaxToolCallsResult(block)
+        continue
+      }
+
       const tool = this.config.tools.find((t) => t.name === block.name)
       if (tool?.isReadOnly?.()) {
-        readOnly.push({ block, tool })
+        readOnly.push({ index, block, tool })
       } else {
-        mutations.push({ block, tool })
+        mutations.push({ index, block, tool })
       }
     }
-
-    const results: (ToolResult & { tool_name?: string })[] = []
 
     // Execute read-only tools concurrently (batched by MAX_CONCURRENCY)
     for (let i = 0; i < readOnly.length; i += MAX_CONCURRENCY) {
@@ -552,16 +653,44 @@ export class QueryEngine {
           this.executeSingleTool(item.block, item.tool, context),
         ),
       )
-      results.push(...batchResults)
+      for (let j = 0; j < batch.length; j++) {
+        results[batch[j].index] = batchResults[j]
+      }
     }
 
     // Execute mutation tools sequentially
     for (const item of mutations) {
-      const result = await this.executeSingleTool(item.block, item.tool, context)
-      results.push(result)
+      results[item.index] = await this.executeSingleTool(item.block, item.tool, context)
     }
 
-    return results
+    return results.filter((result): result is ToolResult & { tool_name?: string } => Boolean(result))
+  }
+
+  private claimToolCall(): boolean {
+    this.toolCallBudget.toolCallCount++
+
+    const maxToolCalls = this.toolCallBudget.maxToolCalls
+    if (maxToolCalls === undefined || this.toolCallBudget.toolCallCount <= maxToolCalls) {
+      return true
+    }
+
+    this.toolCallBudget.exceeded = true
+    this.toolCallBudget.blockedToolCallCount++
+    return false
+  }
+
+  private createMaxToolCallsResult(block: ToolUseBlock): ToolResult & { tool_name?: string } {
+    const maxToolCalls = this.toolCallBudget.maxToolCalls ?? 0
+    return {
+      type: 'tool_result',
+      tool_use_id: block.id,
+      content:
+        `Error: maxToolCalls exceeded (${maxToolCalls} allowed; ` +
+        `${this.toolCallBudget.toolCallCount} requested). ` +
+        `Tool "${block.name}" was not executed.`,
+      is_error: true,
+      tool_name: block.name,
+    }
   }
 
   /**
@@ -593,6 +722,22 @@ export class QueryEngine {
       }
     }
 
+    const sandboxBlockReason = getSandboxToolBlockReason(
+      block.name,
+      block.input,
+      this.config.sandbox,
+      tool,
+    )
+    if (sandboxBlockReason) {
+      return {
+        type: 'tool_result',
+        tool_use_id: block.id,
+        content: sandboxBlockReason,
+        is_error: true,
+        tool_name: block.name,
+      }
+    }
+
     // Check permissions
     if (this.config.canUseTool) {
       try {
@@ -608,6 +753,9 @@ export class QueryEngine {
         }
         if (permission.updatedInput !== undefined) {
           block = { ...block, input: permission.updatedInput }
+        }
+        if (isUnsandboxedBashRequest(block)) {
+          context.approvedUnsandboxedBashToolUseIds?.add(block.id)
         }
       } catch (err: any) {
         return {
@@ -640,7 +788,26 @@ export class QueryEngine {
 
     // Execute the tool
     try {
-      const result = await tool.call(block.input, context)
+      const toolContext: ToolContext = {
+        ...context,
+        toolUseId: block.id,
+        __sdkInternalToolCall: true,
+      }
+      if (isUnsandboxedBashRequest(block)) {
+        const inheritedCanUseTool = context.canUseTool
+        toolContext.canUseTool = async (requestedTool, requestedInput) => {
+          if (
+            requestedTool.name === 'Bash' &&
+            toolContext.approvedUnsandboxedBashToolUseIds?.has(block.id)
+          ) {
+            return { behavior: 'allow' }
+          }
+          return inheritedCanUseTool
+            ? inheritedCanUseTool(requestedTool, requestedInput)
+            : { behavior: 'deny', message: 'No host approval handler is available.' }
+        }
+      }
+      const result = await tool.call(block.input, toolContext)
 
       // Hook: PostToolUse
       await this.executeHooks('PostToolUse', {

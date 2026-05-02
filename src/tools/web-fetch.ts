@@ -3,6 +3,14 @@
  */
 
 import { defineTool } from './types.js'
+import {
+  checkSandboxUrl,
+  checkSandboxUrlForFetch,
+  claimDirectToolCallBudget,
+  requireSandboxContext,
+} from '../utils/sandbox.js'
+
+const MAX_SANDBOX_REDIRECTS = 5
 
 export const WebFetchTool = defineTool({
   name: 'WebFetch',
@@ -22,12 +30,27 @@ export const WebFetchTool = defineTool({
     required: ['url'],
   },
   isReadOnly: true,
+  sandboxAware: true,
   isConcurrencySafe: true,
-  async call(input, _context) {
+  async call(input, context) {
     const { url, headers } = input
+    const contextBlockReason = requireSandboxContext(context.sandbox, 'WebFetch')
+    if (contextBlockReason) {
+      return { data: contextBlockReason, is_error: true }
+    }
+    if (!context.__sdkInternalToolCall) {
+      const budgetBlockReason = claimDirectToolCallBudget(context.toolCallBudget, 'WebFetch')
+      if (budgetBlockReason) {
+        return { data: budgetBlockReason, is_error: true }
+      }
+    }
+    const sandboxBlockReason = await checkSandboxUrlForFetch(context.sandbox, url)
+    if (sandboxBlockReason) {
+      return { data: sandboxBlockReason, is_error: true }
+    }
 
     try {
-      const response = await fetch(url, {
+      const response = await fetchWithSandboxRedirects(url, context.sandbox, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (compatible; AgentSDK/1.0)',
           ...headers,
@@ -64,3 +87,35 @@ export const WebFetchTool = defineTool({
     }
   },
 })
+
+async function fetchWithSandboxRedirects(
+  initialUrl: string,
+  sandbox: Parameters<typeof checkSandboxUrl>[0],
+  init: RequestInit,
+): Promise<Response> {
+  let currentUrl = initialUrl
+
+  for (let redirects = 0; redirects <= MAX_SANDBOX_REDIRECTS; redirects++) {
+    const response = await fetch(currentUrl, {
+      ...init,
+      redirect: 'manual',
+    })
+
+    if (![301, 302, 303, 307, 308].includes(response.status)) {
+      return response
+    }
+
+    const location = response.headers.get('location')
+    if (!location) return response
+
+    const nextUrl = new URL(location, currentUrl).toString()
+    const sandboxBlockReason = await checkSandboxUrlForFetch(sandbox, nextUrl)
+    if (sandboxBlockReason) {
+      throw new Error(sandboxBlockReason)
+    }
+
+    currentUrl = nextUrl
+  }
+
+  throw new Error(`Too many redirects; maximum is ${MAX_SANDBOX_REDIRECTS}`)
+}

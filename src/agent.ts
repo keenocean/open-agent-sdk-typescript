@@ -26,9 +26,10 @@ import type {
   CanUseToolFn,
   Message,
   PermissionMode,
+  SandboxRuntimePolicy,
 } from './types.js'
 import { QueryEngine } from './engine.js'
-import { getAllBaseTools, filterTools } from './tools/index.js'
+import { getAllBaseTools, getSafeBaseTools, filterTools } from './tools/index.js'
 import { connectMCPServer, type MCPConnection } from './mcp/client.js'
 import { isSdkServerConfig } from './sdk-mcp-server.js'
 import { registerAgents } from './tools/agent-tool.js'
@@ -40,6 +41,7 @@ import { createHookRegistry, type HookRegistry } from './hooks.js'
 import { initBundledSkills } from './skills/index.js'
 import { createProvider, type LLMProvider, type ApiType } from './providers/index.js'
 import type { NormalizedMessageParam } from './providers/types.js'
+import { createSandboxPolicy, getSandboxStartupError } from './utils/sandbox.js'
 
 // --------------------------------------------------------------------------
 // Agent class
@@ -55,7 +57,9 @@ export class Agent {
   private mcpLinks: MCPConnection[] = []
   private history: NormalizedMessageParam[] = []
   private messageLog: Message[] = []
-  private setupDone: Promise<void>
+  private setupDone: Promise<void> | null = null
+  private sdkMcpToolsAdded = false
+  private externalMcpSetupDone = false
   private sid: string
   private abortCtrl: AbortController | null = null
   private currentEngine: QueryEngine | null = null
@@ -107,8 +111,8 @@ export class Agent {
     // Build tool pool from options (supports ToolDefinition[], string[], or preset)
     this.toolPool = this.buildToolPool()
 
-    // Kick off async setup (MCP connections, agent registration, session resume)
-    this.setupDone = this.setup()
+    // Async setup is intentionally lazy. query() must establish sandbox policy
+    // before any external MCP transport can be connected.
   }
 
   /**
@@ -173,7 +177,9 @@ export class Agent {
     const raw = this.cfg.tools
     let pool: ToolDefinition[]
 
-    if (!raw || (typeof raw === 'object' && !Array.isArray(raw) && 'type' in raw)) {
+    if (!raw) {
+      pool = getSafeBaseTools()
+    } else if (typeof raw === 'object' && !Array.isArray(raw) && 'type' in raw) {
       pool = getAllBaseTools()
     } else if (Array.isArray(raw) && raw.length > 0 && typeof raw[0] === 'string') {
       pool = filterTools(getAllBaseTools(), raw as string[])
@@ -187,32 +193,18 @@ export class Agent {
   /**
    * Async initialization: connect MCP servers, register agents, resume sessions.
    */
+  private async ensureSetup(sandbox: SandboxRuntimePolicy): Promise<void> {
+    if (!this.setupDone) {
+      this.setupDone = this.setup()
+    }
+    await this.setupDone
+    await this.setupMcpForPolicy(sandbox)
+  }
+
   private async setup(): Promise<void> {
     // Register custom agent definitions
     if (this.cfg.agents) {
       registerAgents(this.cfg.agents)
-    }
-
-    // Connect MCP servers (supports stdio, SSE, HTTP, and in-process SDK servers)
-    if (this.cfg.mcpServers) {
-      for (const [name, config] of Object.entries(this.cfg.mcpServers)) {
-        try {
-          if (isSdkServerConfig(config)) {
-            // In-process SDK MCP server - directly add tools
-            this.toolPool = [...this.toolPool, ...config.tools]
-          } else {
-            // External MCP server
-            const connection = await connectMCPServer(name, config)
-            this.mcpLinks.push(connection)
-
-            if (connection.status === 'connected' && connection.tools.length > 0) {
-              this.toolPool = [...this.toolPool, ...connection.tools]
-            }
-          }
-        } catch (err: any) {
-          console.error(`[MCP] Failed to connect to "${name}": ${err.message}`)
-        }
-      }
     }
 
     // Resume or continue session
@@ -225,6 +217,53 @@ export class Agent {
     }
   }
 
+  private async setupMcpForPolicy(sandbox: SandboxRuntimePolicy): Promise<void> {
+    // Connect MCP servers (supports stdio, SSE, HTTP, and in-process SDK servers)
+    if (!this.cfg.mcpServers) return
+
+    if (!this.sdkMcpToolsAdded) {
+      for (const config of Object.values(this.cfg.mcpServers)) {
+        if (isSdkServerConfig(config)) {
+          this.toolPool = [...this.toolPool, ...config.tools]
+        }
+      }
+      this.toolPool = filterTools(
+        this.toolPool,
+        this.cfg.allowedTools,
+        this.cfg.disallowedTools,
+      )
+      this.sdkMcpToolsAdded = true
+    }
+
+    if (sandbox.enabled || this.externalMcpSetupDone) return
+
+    for (const [name, config] of Object.entries(this.cfg.mcpServers)) {
+      if (isSdkServerConfig(config)) continue
+      try {
+        // External MCP server
+        const connection = await connectMCPServer(name, config)
+        this.mcpLinks.push(connection)
+
+        if (connection.status === 'connected' && connection.tools.length > 0) {
+          this.toolPool = [...this.toolPool, ...connection.tools]
+        }
+        this.toolPool = filterTools(
+          this.toolPool,
+          this.cfg.allowedTools,
+          this.cfg.disallowedTools,
+        )
+      } catch (err: any) {
+        console.error(`[MCP] Failed to connect to "${name}": ${err.message}`)
+      }
+    }
+    this.externalMcpSetupDone = true
+  }
+
+  private filterSandboxedTools(tools: ToolDefinition[], sandbox: SandboxRuntimePolicy): ToolDefinition[] {
+    if (!sandbox.enabled) return tools
+    return tools.filter(tool => !tool.name.startsWith('mcp__'))
+  }
+
   /**
    * Run a query with streaming events.
    */
@@ -232,10 +271,25 @@ export class Agent {
     prompt: string,
     overrides?: Partial<AgentOptions>,
   ): AsyncGenerator<SDKMessage, void> {
-    await this.setupDone
-
     const opts = { ...this.cfg, ...overrides }
     const cwd = opts.cwd || process.cwd()
+    const sandbox = createSandboxPolicy({ enabled: true, ...opts.sandbox }, cwd)
+    const sandboxStartupError = getSandboxStartupError(sandbox)
+    if (sandboxStartupError) {
+      yield {
+        type: 'result',
+        subtype: 'error_sandbox_unavailable',
+        is_error: true,
+        num_turns: 0,
+        cost: 0,
+        total_cost_usd: 0,
+        usage: { input_tokens: 0, output_tokens: 0 },
+        errors: [sandboxStartupError],
+      }
+      return
+    }
+
+    await this.ensureSetup(sandbox)
 
     // Create abort controller for this query
     this.abortCtrl = opts.abortController || new AbortController()
@@ -256,30 +310,35 @@ export class Agent {
     }
 
     // Build canUseTool based on permission mode
-    const permMode = opts.permissionMode ?? 'bypassPermissions'
-    const canUseTool: CanUseToolFn = opts.canUseTool ?? (async (_tool, _input) => {
-      if (permMode === 'bypassPermissions' || permMode === 'dontAsk' || permMode === 'auto') {
-        return { behavior: 'allow' }
-      }
-      if (permMode === 'acceptEdits') {
-        return { behavior: 'allow' }
-      }
-      return { behavior: 'allow' }
-    })
+    const permMode = opts.permissionMode ?? 'default'
+    const canUseTool: CanUseToolFn =
+      opts.canUseTool ?? this.createDefaultPermissionHandler(permMode, sandbox)
 
-    // Resolve tools with overrides
+    // Resolve tools with per-query overrides. String lists are explicit built-in
+    // tool selections, so they are resolved from the full registry.
     let tools = this.toolPool
+    if (overrides?.tools) {
+      const ot = overrides.tools
+      const expansionPool = this.cfg.allowQueryToolExpansion === true
+        ? getAllBaseTools()
+        : this.toolPool
+      if (typeof ot === 'object' && !Array.isArray(ot) && 'type' in ot) {
+        tools = expansionPool
+      } else if (Array.isArray(ot) && ot.length > 0 && typeof ot[0] === 'string') {
+        tools = filterTools(expansionPool, ot as string[])
+      } else if (Array.isArray(ot)) {
+        tools = this.cfg.allowQueryToolExpansion === true
+          ? ot as ToolDefinition[]
+          : (ot as ToolDefinition[]).filter(tool =>
+              this.toolPool.some(existing => existing.name === tool.name),
+            )
+      }
+    }
+    tools = filterTools(tools, this.cfg.allowedTools, this.cfg.disallowedTools)
     if (overrides?.allowedTools || overrides?.disallowedTools) {
       tools = filterTools(tools, overrides.allowedTools, overrides.disallowedTools)
     }
-    if (overrides?.tools) {
-      const ot = overrides.tools
-      if (Array.isArray(ot) && ot.length > 0 && typeof ot[0] === 'string') {
-        tools = filterTools(this.toolPool, ot as string[])
-      } else if (Array.isArray(ot)) {
-        tools = ot as ToolDefinition[]
-      }
-    }
+    tools = this.filterSandboxedTools(tools, sandbox)
 
     // Recreate provider if overrides change credentials or apiType
     let provider = this.provider
@@ -301,7 +360,10 @@ export class Agent {
       appendSystemPrompt,
       maxTurns: opts.maxTurns ?? 10,
       maxBudgetUsd: opts.maxBudgetUsd,
+      maxToolCalls: opts.maxToolCalls,
       maxTokens: opts.maxTokens ?? 16384,
+      permissionMode: permMode,
+      sandbox,
       thinking: opts.thinking,
       jsonSchema: opts.jsonSchema,
       canUseTool,
@@ -348,6 +410,51 @@ export class Agent {
     })
   }
 
+  private createDefaultPermissionHandler(
+    permissionMode: PermissionMode,
+    sandbox: SandboxRuntimePolicy,
+  ): CanUseToolFn {
+    return async (tool, input) => {
+      if (
+        sandbox.enabled &&
+        tool.name === 'Bash' &&
+        typeof input === 'object' &&
+        input !== null &&
+        (input as { dangerouslyDisableSandbox?: unknown }).dangerouslyDisableSandbox === true
+      ) {
+        return {
+          behavior: 'deny',
+          message:
+            'Unsandboxed Bash requires an explicit canUseTool handler from the SDK host.',
+        }
+      }
+
+      if (
+        permissionMode === 'bypassPermissions' ||
+        permissionMode === 'dontAsk' ||
+        permissionMode === 'auto'
+      ) {
+        return { behavior: 'allow' }
+      }
+
+      if (tool.isReadOnly?.()) {
+        return { behavior: 'allow' }
+      }
+
+      if (
+        permissionMode === 'acceptEdits' &&
+        ['Write', 'Edit', 'NotebookEdit', 'TodoWrite'].includes(tool.name)
+      ) {
+        return { behavior: 'allow' }
+      }
+
+      return {
+        behavior: 'deny',
+        message: `Tool "${tool.name}" is not pre-approved. Provide canUseTool, allowed tools, or permissionMode: "bypassPermissions" to opt in.`,
+      }
+    }
+  }
+
   /**
    * Convenience method: send a prompt and collect the final answer as a single object.
    * Internally iterates through the streaming query and aggregates the outcome.
@@ -357,7 +464,15 @@ export class Agent {
     overrides?: Partial<AgentOptions>,
   ): Promise<QueryResult> {
     const t0 = performance.now()
-    const collected = { text: '', turns: 0, tokens: { in: 0, out: 0 } }
+    const collected = {
+      text: '',
+      turns: 0,
+      tokens: { in: 0, out: 0 },
+      toolCalls: undefined as number | undefined,
+      maxToolCalls: undefined as number | undefined,
+      blockedToolCalls: undefined as number | undefined,
+      canContinue: undefined as boolean | undefined,
+    }
 
     for await (const ev of this.query(text, overrides)) {
       switch (ev.type) {
@@ -373,6 +488,10 @@ export class Agent {
           collected.turns = ev.num_turns ?? 0
           collected.tokens.in = ev.usage?.input_tokens ?? 0
           collected.tokens.out = ev.usage?.output_tokens ?? 0
+          collected.toolCalls = ev.tool_calls
+          collected.maxToolCalls = ev.max_tool_calls
+          collected.blockedToolCalls = ev.blocked_tool_calls
+          collected.canContinue = ev.can_continue
           break
       }
     }
@@ -381,6 +500,10 @@ export class Agent {
       text: collected.text,
       usage: { input_tokens: collected.tokens.in, output_tokens: collected.tokens.out },
       num_turns: collected.turns,
+      tool_calls: collected.toolCalls,
+      max_tool_calls: collected.maxToolCalls,
+      blocked_tool_calls: collected.blockedToolCalls,
+      can_continue: collected.canContinue,
       duration_ms: Math.round(performance.now() - t0),
       messages: [...this.messageLog],
     }

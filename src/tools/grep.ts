@@ -5,6 +5,11 @@
 import { spawn } from 'child_process'
 import { resolve } from 'path'
 import { defineTool } from './types.js'
+import {
+  checkSandboxRead,
+  claimDirectToolCallBudget,
+  requireSandboxContext,
+} from '../utils/sandbox.js'
 
 export const GrepTool = defineTool({
   name: 'Grep',
@@ -50,11 +55,26 @@ export const GrepTool = defineTool({
     required: ['pattern'],
   },
   isReadOnly: true,
+  sandboxAware: true,
   isConcurrencySafe: true,
   async call(input, context) {
+    const contextBlockReason = requireSandboxContext(context.sandbox, 'Grep')
+    if (contextBlockReason) {
+      return { data: contextBlockReason, is_error: true }
+    }
+    if (!context.__sdkInternalToolCall) {
+      const budgetBlockReason = claimDirectToolCallBudget(context.toolCallBudget, 'Grep')
+      if (budgetBlockReason) {
+        return { data: budgetBlockReason, is_error: true }
+      }
+    }
     const searchPath = input.path ? resolve(context.cwd, input.path) : context.cwd
     const outputMode = input.output_mode || 'files_with_matches'
     const headLimit = input.head_limit ?? 250
+    const sandboxBlockReason = checkSandboxRead(context.sandbox, context.cwd, searchPath)
+    if (sandboxBlockReason) {
+      return { data: sandboxBlockReason, is_error: true }
+    }
 
     // Build rg command (fall back to grep if rg unavailable)
     const args: string[] = []

@@ -54,11 +54,7 @@ export function createSdkMcpServer(options: {
   // Convert SDK tools to engine-compatible tool definitions
   // Prefix tool names with mcp__{server_name}__ for namespace isolation
   const toolDefinitions: ToolDefinition[] = sdkTools.map((sdkTool) => {
-    const toolDef = sdkToolToToolDefinition(sdkTool)
-    return {
-      ...toolDef,
-      name: `mcp__${options.name}__${sdkTool.name}`,
-    }
+    return sdkToolToToolDefinition(sdkTool, `mcp__${options.name}__${sdkTool.name}`)
   })
 
   return {

@@ -3,6 +3,11 @@
  */
 
 import { defineTool } from './types.js'
+import {
+  checkSandboxUrlForFetch,
+  claimDirectToolCallBudget,
+  requireSandboxContext,
+} from '../utils/sandbox.js'
 
 export const WebSearchTool = defineTool({
   name: 'WebSearch',
@@ -22,21 +27,49 @@ export const WebSearchTool = defineTool({
     required: ['query'],
   },
   isReadOnly: true,
+  sandboxAware: true,
   isConcurrencySafe: true,
-  async call(input, _context) {
+  async call(input, context) {
     const { query } = input
+    const contextBlockReason = requireSandboxContext(context.sandbox, 'WebSearch')
+    if (contextBlockReason) {
+      return { data: contextBlockReason, is_error: true }
+    }
+    if (!context.__sdkInternalToolCall) {
+      const budgetBlockReason = claimDirectToolCallBudget(context.toolCallBudget, 'WebSearch')
+      if (budgetBlockReason) {
+        return { data: budgetBlockReason, is_error: true }
+      }
+    }
 
     try {
       // Use DuckDuckGo HTML search as a free fallback
       const encoded = encodeURIComponent(query)
       const url = `https://html.duckduckgo.com/html/?q=${encoded}`
+      const sandboxBlockReason = await checkSandboxUrlForFetch(context.sandbox, url)
+      if (sandboxBlockReason) {
+        return { data: sandboxBlockReason, is_error: true }
+      }
 
       const response = await fetch(url, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (compatible; AgentSDK/1.0)',
         },
         signal: AbortSignal.timeout(15000),
+        redirect: 'manual',
       })
+
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const location = response.headers.get('location')
+        if (location) {
+          const nextUrl = new URL(location, url).toString()
+          const redirectBlockReason = await checkSandboxUrlForFetch(context.sandbox, nextUrl)
+          if (redirectBlockReason) {
+            return { data: redirectBlockReason, is_error: true }
+          }
+        }
+        return { data: `Search redirected: HTTP ${response.status}`, is_error: true }
+      }
 
       if (!response.ok) {
         return { data: `Search failed: HTTP ${response.status}`, is_error: true }

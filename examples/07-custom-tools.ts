@@ -5,7 +5,7 @@
  *
  * Run: npx tsx examples/07-custom-tools.ts
  */
-import { createAgent, getAllBaseTools, defineTool } from '../src/index.js'
+import { createAgent, getSafeBaseTools, defineTool } from '../src/index.js'
 
 const weatherTool = defineTool({
   name: 'GetWeather',
@@ -18,6 +18,7 @@ const weatherTool = defineTool({
     required: ['city'],
   },
   isReadOnly: true,
+  sandboxAware: true,
   isConcurrencySafe: true,
   async call(input) {
     const temps: Record<string, number> = {
@@ -39,9 +40,13 @@ const calculatorTool = defineTool({
     required: ['expression'],
   },
   isReadOnly: true,
+  sandboxAware: true,
   isConcurrencySafe: true,
   async call(input) {
     try {
+      if (!/^[\d+\-*/().\s%]+$/.test(input.expression)) {
+        return { data: 'Error: only arithmetic expressions are supported', is_error: true }
+      }
       const result = Function(`'use strict'; return (${input.expression})`)()
       return `${input.expression} = ${result}`
     } catch (e: any) {
@@ -53,7 +58,7 @@ const calculatorTool = defineTool({
 async function main() {
   console.log('--- Example 7: Custom Tools ---\n')
 
-  const builtinTools = getAllBaseTools()
+  const builtinTools = getSafeBaseTools()
   const allTools = [...builtinTools, weatherTool, calculatorTool]
 
   const agent = createAgent({

@@ -5,6 +5,11 @@
 import { writeFile, mkdir } from 'fs/promises'
 import { resolve, dirname } from 'path'
 import { defineTool } from './types.js'
+import {
+  checkSandboxWrite,
+  claimDirectToolCallBudget,
+  requireSandboxContext,
+} from '../utils/sandbox.js'
 
 export const FileWriteTool = defineTool({
   name: 'Write',
@@ -24,9 +29,36 @@ export const FileWriteTool = defineTool({
     required: ['file_path', 'content'],
   },
   isReadOnly: false,
+  sandboxAware: true,
   isConcurrencySafe: false,
   async call(input, context) {
+    const contextBlockReason = requireSandboxContext(context.sandbox, 'Write')
+    if (contextBlockReason) {
+      return { data: contextBlockReason, is_error: true }
+    }
+    if (!context.__sdkInternalToolCall) {
+      const budgetBlockReason = claimDirectToolCallBudget(context.toolCallBudget, 'Write')
+      if (budgetBlockReason) {
+        return { data: budgetBlockReason, is_error: true }
+      }
+    }
     const filePath = resolve(context.cwd, input.file_path)
+    const sandboxBlockReason = checkSandboxWrite(context.sandbox, context.cwd, filePath)
+    if (sandboxBlockReason) {
+      return { data: sandboxBlockReason, is_error: true }
+    }
+    if (!context.__sdkInternalToolCall) {
+      if (!context.canUseTool) {
+        return { data: 'Write requires explicit host approval through context.canUseTool.', is_error: true }
+      }
+      const permission = await context.canUseTool(FileWriteTool, input)
+      if (permission.behavior === 'deny') {
+        return { data: permission.message || 'Write was denied by host approval.', is_error: true }
+      }
+      if (permission.updatedInput !== undefined) {
+        input = permission.updatedInput
+      }
+    }
 
     try {
       await mkdir(dirname(filePath), { recursive: true })

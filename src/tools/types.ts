@@ -13,6 +13,7 @@ export function defineTool(config: {
   inputSchema: ToolInputSchema
   call: (input: any, context: ToolContext) => Promise<string | { data: string; is_error?: boolean }>
   isReadOnly?: boolean
+  sandboxAware?: boolean
   isConcurrencySafe?: boolean
   prompt?: string | ((context: ToolContext) => Promise<string>)
 }): ToolDefinition {
@@ -21,6 +22,7 @@ export function defineTool(config: {
     description: config.description,
     inputSchema: config.inputSchema,
     isReadOnly: () => config.isReadOnly ?? false,
+    sandboxAware: () => config.sandboxAware ?? false,
     isConcurrencySafe: () => config.isConcurrencySafe ?? false,
     isEnabled: () => true,
     prompt: typeof config.prompt === 'function'

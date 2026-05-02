@@ -98,6 +98,14 @@ export interface SDKResultMessage {
   permission_denials?: Array<{ tool: string; reason: string }>
   structured_output?: unknown
   errors?: string[]
+  /** Number of tool_use blocks requested by the model, including blocked calls. */
+  tool_calls?: number
+  /** Hard cap for tool_use blocks in this query/run. Omitted when unlimited. */
+  max_tool_calls?: number
+  /** Number of tool_use blocks blocked by maxToolCalls. */
+  blocked_tool_calls?: number
+  /** True when the run stopped at a resumable hard limit. */
+  can_continue?: boolean
   /** @deprecated Use total_cost_usd */
   cost?: number
 }
@@ -124,6 +132,12 @@ export interface SDKSystemMessage {
   cwd: string
   mcp_servers: Array<{ name: string; status: string }>
   permission_mode: string
+  warnings?: string[]
+  sandbox?: {
+    enabled: boolean
+    trusted: false
+    unavailable_reason?: string
+  }
 }
 
 /** Marks a compaction boundary in the conversation. */
@@ -178,6 +192,8 @@ export interface ToolDefinition {
   inputSchema: ToolInputSchema
   call: (input: any, context: ToolContext) => Promise<ToolResult>
   isReadOnly?: () => boolean
+  /** True when the tool is safe to run while SDK sandbox guards are enabled. */
+  sandboxAware?: () => boolean
   isConcurrencySafe?: () => boolean
   isEnabled?: () => boolean
   prompt?: (context: ToolContext) => Promise<string>
@@ -192,6 +208,20 @@ export interface ToolInputSchema {
 export interface ToolContext {
   cwd: string
   abortSignal?: AbortSignal
+  /** SDK sandbox policy. This is an application-level guard, not an OS sandbox. */
+  sandbox?: SandboxRuntimePolicy
+  /** Parent approval mode inherited by nested tools/subagents. */
+  permissionMode?: PermissionMode
+  /** Parent approval callback inherited by nested tools/subagents. */
+  canUseTool?: CanUseToolFn
+  /** Shared tool call budget inherited by nested tools/subagents. */
+  toolCallBudget?: ToolCallBudget
+  /** Current tool_use id, set by QueryEngine before invoking a tool. */
+  toolUseId?: string
+  /** Tool_use ids explicitly approved for unsandboxed Bash by host canUseTool. */
+  approvedUnsandboxedBashToolUseIds?: Set<string>
+  /** Internal marker set by QueryEngine after it has applied budget/sandbox/permission guards. */
+  __sdkInternalToolCall?: boolean
   /** Parent agent's LLM provider (inherited by subagents) */
   provider?: import('./providers/types.js').LLMProvider
   /** Parent agent's model ID */
@@ -205,6 +235,17 @@ export interface ToolResult {
   tool_use_id: string
   content: string | any[]
   is_error?: boolean
+}
+
+export interface ToolCallBudget {
+  /** Omitted means unlimited; callers must opt into unlimited explicitly. */
+  maxToolCalls?: number
+  /** Counts model-requested tool_use blocks, including blocked calls. */
+  toolCallCount: number
+  /** Counts calls blocked specifically because maxToolCalls was exceeded. */
+  blockedToolCallCount: number
+  /** Set once the hard cap has blocked at least one tool_use. */
+  exceeded: boolean
 }
 
 // --------------------------------------------------------------------------
@@ -287,6 +328,11 @@ export interface ThinkingConfig {
 
 export interface SandboxSettings {
   enabled?: boolean
+  /**
+   * Fail the query if sandbox.enabled is true but no trusted OS sandbox runtime
+   * is available. The TypeScript SDK currently provides app-level guards only.
+   */
+  failIfUnavailable?: boolean
   autoAllowBashIfSandboxed?: boolean
   excludedCommands?: string[]
   allowUnsandboxedCommands?: boolean
@@ -299,6 +345,7 @@ export interface SandboxSettings {
 
 export interface SandboxNetworkConfig {
   allowedDomains?: string[]
+  deniedDomains?: string[]
   allowManagedDomainsOnly?: boolean
   allowLocalBinding?: boolean
   allowUnixSockets?: string[]
@@ -308,9 +355,22 @@ export interface SandboxNetworkConfig {
 }
 
 export interface SandboxFilesystemConfig {
+  allowRead?: string[]
   allowWrite?: string[]
   denyWrite?: string[]
   denyRead?: string[]
+}
+
+export interface SandboxRuntimePolicy {
+  enabled: boolean
+  trusted: false
+  failIfUnavailable: boolean
+  autoAllowBashIfSandboxed: boolean
+  allowUnsandboxedCommands: boolean
+  unavailableReason?: string
+  warnings: string[]
+  network: SandboxNetworkConfig
+  filesystem: SandboxFilesystemConfig
 }
 
 // --------------------------------------------------------------------------
@@ -362,10 +422,17 @@ export interface AgentOptions {
   appendSystemPrompt?: string
   /** Available tools (ToolDefinition[] or string[] preset) */
   tools?: ToolDefinition[] | string[] | { type: 'preset'; preset: 'default' }
+  /** Allow per-query tools overrides to expand beyond the constructor tool pool. Defaults to false. */
+  allowQueryToolExpansion?: boolean
   /** Maximum number of agentic turns per query */
   maxTurns?: number
   /** Maximum USD budget per query */
   maxBudgetUsd?: number
+  /**
+   * Hard cap on model-requested tool_use blocks per query. Defaults to 50.
+   * Set to Infinity to opt out intentionally.
+   */
+  maxToolCalls?: number
   /** Extended thinking configuration */
   thinking?: ThinkingConfig
   /** Maximum thinking tokens (deprecated, use thinking.budgetTokens) */
@@ -453,6 +520,14 @@ export interface QueryResult {
   usage: TokenUsage
   /** Number of agentic turns */
   num_turns: number
+  /** Number of tool_use blocks requested by the model, including blocked calls. */
+  tool_calls?: number
+  /** Hard cap for tool_use blocks in this query/run. Omitted when unlimited. */
+  max_tool_calls?: number
+  /** Number of tool_use blocks blocked by maxToolCalls. */
+  blocked_tool_calls?: number
+  /** True when the run stopped at a resumable hard limit. */
+  can_continue?: boolean
   /** Duration in milliseconds */
   duration_ms: number
   /** All conversation messages */
@@ -473,7 +548,11 @@ export interface QueryEngineConfig {
   appendSystemPrompt?: string
   maxTurns: number
   maxBudgetUsd?: number
+  maxToolCalls?: number
+  toolCallBudget?: ToolCallBudget
   maxTokens: number
+  permissionMode?: PermissionMode
+  sandbox?: SandboxRuntimePolicy
   thinking?: ThinkingConfig
   jsonSchema?: Record<string, unknown>
   canUseTool: CanUseToolFn

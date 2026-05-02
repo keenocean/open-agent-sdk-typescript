@@ -2,8 +2,13 @@
  * GlobTool - File pattern matching
  */
 
-import { resolve } from 'path'
+import { isAbsolute, resolve } from 'path'
 import { defineTool } from './types.js'
+import {
+  checkSandboxRead,
+  claimDirectToolCallBudget,
+  requireSandboxContext,
+} from '../utils/sandbox.js'
 
 export const GlobTool = defineTool({
   name: 'Glob',
@@ -23,10 +28,29 @@ export const GlobTool = defineTool({
     required: ['pattern'],
   },
   isReadOnly: true,
+  sandboxAware: true,
   isConcurrencySafe: true,
   async call(input, context) {
+    const contextBlockReason = requireSandboxContext(context.sandbox, 'Glob')
+    if (contextBlockReason) {
+      return { data: contextBlockReason, is_error: true }
+    }
+    if (!context.__sdkInternalToolCall) {
+      const budgetBlockReason = claimDirectToolCallBudget(context.toolCallBudget, 'Glob')
+      if (budgetBlockReason) {
+        return { data: budgetBlockReason, is_error: true }
+      }
+    }
     const searchDir = input.path ? resolve(context.cwd, input.path) : context.cwd
     const { pattern } = input
+    const sandboxBlockReason = checkSandboxRead(context.sandbox, context.cwd, searchDir)
+    if (sandboxBlockReason) {
+      return { data: sandboxBlockReason, is_error: true }
+    }
+    const patternBlockReason = getSandboxGlobPatternBlockReason(pattern, context.sandbox?.enabled)
+    if (patternBlockReason) {
+      return { data: patternBlockReason, is_error: true }
+    }
 
     try {
       // Use Node.js glob (available in Node 22+) or fall back to bash find
@@ -37,6 +61,12 @@ export const GlobTool = defineTool({
         const matches: string[] = []
         // @ts-ignore
         for await (const entry of glob(pattern, { cwd: searchDir })) {
+          const entryBlockReason = checkSandboxRead(
+            context.sandbox,
+            context.cwd,
+            resolve(searchDir, entry),
+          )
+          if (entryBlockReason) continue
           matches.push(entry)
           if (matches.length >= 500) break
         }
@@ -47,6 +77,13 @@ export const GlobTool = defineTool({
       }
     } catch {
       // Fall through to bash-based approach
+    }
+
+    if (context.sandbox?.enabled) {
+      return {
+        data: 'Error: Node.js glob API unavailable; bash fallback is disabled while SDK sandbox mode is enabled.',
+        is_error: true,
+      }
     }
 
     // Fallback: use bash find/glob
@@ -75,3 +112,17 @@ export const GlobTool = defineTool({
     })
   },
 })
+
+function getSandboxGlobPatternBlockReason(
+  pattern: string,
+  sandboxEnabled: boolean | undefined,
+): string | undefined {
+  if (!sandboxEnabled) return undefined
+  if (isAbsolute(pattern)) {
+    return 'Error: absolute glob patterns are blocked while SDK sandbox mode is enabled.'
+  }
+  if (pattern.split(/[\\/]+/).includes('..')) {
+    return 'Error: parent-directory glob patterns are blocked while SDK sandbox mode is enabled.'
+  }
+  return undefined
+}

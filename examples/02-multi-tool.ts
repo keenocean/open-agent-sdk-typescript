@@ -14,6 +14,9 @@ async function main() {
   const agent = createAgent({
     model: process.env.CODEANY_MODEL || 'claude-sonnet-4-6',
     maxTurns: 15,
+    tools: ['Read', 'Glob', 'Bash'],
+    permissionMode: 'bypassPermissions',
+    sandbox: { enabled: false },
   })
 
   for await (const event of agent.query(

@@ -7,8 +7,9 @@
 
 import type { ToolDefinition, ToolContext, ToolResult, AgentDefinition } from '../types.js'
 import { QueryEngine } from '../engine.js'
-import { getAllBaseTools, filterTools } from './index.js'
+import { getAllBaseTools, getSafeBaseTools, filterTools } from './index.js'
 import { createProvider, type ApiType } from '../providers/index.js'
+import { claimDirectToolCallBudget, requireSandboxContext } from '../utils/sandbox.js'
 
 // Store for registered agent definitions
 let registeredAgents: Record<string, AgentDefinition> = {}
@@ -34,12 +35,12 @@ const BUILTIN_AGENTS: Record<string, AgentDefinition> = {
   Explore: {
     description: 'Fast agent for exploring codebases. Use for finding files, searching code, and answering questions about the codebase.',
     prompt: 'You are a codebase exploration agent. Search through files and code to answer questions. Be thorough but efficient. Use Glob to find files, Grep to search content, and Read to examine files.',
-    tools: ['Read', 'Glob', 'Grep', 'Bash'],
+    tools: ['Read', 'Glob', 'Grep'],
   },
   Plan: {
     description: 'Software architect agent for designing implementation plans. Returns step-by-step plans and identifies critical files.',
     prompt: 'You are a software architect. Design implementation plans for the given task. Identify critical files, consider trade-offs, and provide step-by-step plans. Use search tools to understand the codebase before planning.',
-    tools: ['Read', 'Glob', 'Grep', 'Bash'],
+    tools: ['Read', 'Glob', 'Grep'],
   },
 }
 
@@ -77,21 +78,62 @@ export const AgentTool: ToolDefinition = {
     required: ['prompt', 'description'],
   },
   isReadOnly: () => false,
+  sandboxAware: () => true,
   isConcurrencySafe: () => false,
   isEnabled: () => true,
   async prompt() {
     return 'Launch a subagent to handle complex tasks autonomously.'
   },
   async call(input: any, context: ToolContext): Promise<ToolResult> {
+    const contextBlockReason = requireSandboxContext(context.sandbox, 'Agent')
+    if (contextBlockReason) {
+      return {
+        type: 'tool_result',
+        tool_use_id: '',
+        content: contextBlockReason,
+        is_error: true,
+      }
+    }
+    if (!context.__sdkInternalToolCall) {
+      const budgetBlockReason = claimDirectToolCallBudget(context.toolCallBudget, 'Agent')
+      if (budgetBlockReason) {
+        return {
+          type: 'tool_result',
+          tool_use_id: '',
+          content: budgetBlockReason,
+          is_error: true,
+        }
+      }
+      if (!context.canUseTool) {
+        return {
+          type: 'tool_result',
+          tool_use_id: '',
+          content: 'Agent requires explicit host approval through context.canUseTool.',
+          is_error: true,
+        }
+      }
+      const permission = await context.canUseTool(AgentTool, input)
+      if (permission.behavior === 'deny') {
+        return {
+          type: 'tool_result',
+          tool_use_id: '',
+          content: permission.message || 'Agent was denied by host approval.',
+          is_error: true,
+        }
+      }
+    }
+
     const agentType = input.subagent_type || 'general-purpose'
 
     // Find agent definition
     const agentDef = registeredAgents[agentType] || BUILTIN_AGENTS[agentType]
 
     // Determine tools for subagent
-    let tools = getAllBaseTools()
+    let tools = getSafeBaseTools()
     if (agentDef?.tools) {
-      tools = filterTools(tools, agentDef.tools)
+      tools = filterTools(getAllBaseTools(), agentDef.tools, agentDef.disallowedTools)
+    } else if (agentDef?.disallowedTools) {
+      tools = filterTools(tools, undefined, agentDef.disallowedTools)
     }
 
     // Remove AgentTool from subagent to prevent infinite recursion
@@ -111,6 +153,19 @@ export const AgentTool: ToolDefinition = {
       },
     )
 
+    const canUseTool = async (tool: ToolDefinition, toolInput: unknown) => {
+      if (context.canUseTool) {
+        return context.canUseTool(tool, toolInput)
+      }
+      if (tool.isReadOnly?.()) {
+        return { behavior: 'allow' as const }
+      }
+      return {
+        behavior: 'deny' as const,
+        message: `Subagent tool "${tool.name}" is not pre-approved by the SDK host.`,
+      }
+    }
+
     // Create subagent engine
     const engine = new QueryEngine({
       cwd: context.cwd,
@@ -120,7 +175,10 @@ export const AgentTool: ToolDefinition = {
       systemPrompt,
       maxTurns: agentDef?.maxTurns || 10,
       maxTokens: 16384,
-      canUseTool: async () => ({ behavior: 'allow' }),
+      permissionMode: context.permissionMode ?? 'default',
+      sandbox: context.sandbox,
+      toolCallBudget: context.toolCallBudget,
+      canUseTool,
       includePartialMessages: false,
     })
 

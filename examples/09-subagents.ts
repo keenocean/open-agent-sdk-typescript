@@ -15,6 +15,10 @@ async function main() {
     prompt: 'Use the code-reviewer agent to review src/agent.ts',
     options: {
       allowedTools: ['Read', 'Glob', 'Grep', 'Agent'],
+      canUseTool: async (tool) =>
+        ['Read', 'Glob', 'Grep', 'Agent'].includes(tool.name)
+          ? { behavior: 'allow' }
+          : { behavior: 'deny', message: 'Example only allows read-only tools and Agent' },
       agents: {
         'code-reviewer': {
           description: 'Expert code reviewer for quality and security reviews.',

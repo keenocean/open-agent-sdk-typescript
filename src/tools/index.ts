@@ -133,11 +133,24 @@ const ALL_TOOLS: ToolDefinition[] = [
   SkillTool,
 ]
 
+const SAFE_DEFAULT_TOOL_NAMES = ['Read', 'Glob', 'Grep']
+
 /**
  * Get all built-in tools.
  */
 export function getAllBaseTools(): ToolDefinition[] {
   return [...ALL_TOOLS]
+}
+
+/**
+ * Built-in tools exposed when no explicit tool pool is provided.
+ *
+ * This intentionally excludes shell, write, network, agent, MCP, and scheduler
+ * tools. Use getAllBaseTools() or { type: 'preset', preset: 'default' } when a
+ * host application intentionally wants the full tool surface.
+ */
+export function getSafeBaseTools(): ToolDefinition[] {
+  return filterTools(ALL_TOOLS, SAFE_DEFAULT_TOOL_NAMES)
 }
 
 /**
@@ -151,16 +164,32 @@ export function filterTools(
   let filtered = tools
 
   if (allowedTools && allowedTools.length > 0) {
-    const allowed = new Set(allowedTools)
-    filtered = filtered.filter((t) => allowed.has(t.name))
+    filtered = filtered.filter((t) => allowedTools.some((rule) => toolRuleMatches(rule, t.name)))
   }
 
   if (disallowedTools && disallowedTools.length > 0) {
-    const disallowed = new Set(disallowedTools)
-    filtered = filtered.filter((t) => !disallowed.has(t.name))
+    filtered = filtered.filter((t) => !disallowedTools.some((rule) => toolRuleMatches(rule, t.name)))
   }
 
   return filtered
+}
+
+function toolRuleMatches(rule: string, toolName: string): boolean {
+  const normalized = rule.trim()
+  if (!normalized) return false
+
+  const bareToolName = normalized.includes('(')
+    ? normalized.slice(0, normalized.indexOf('(')).trim()
+    : normalized
+
+  if (bareToolName === '*') return true
+  if (!bareToolName.includes('*')) return bareToolName === toolName
+
+  const source = bareToolName
+    .split('*')
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('.*')
+  return new RegExp(`^${source}$`).test(toolName)
 }
 
 /**

@@ -4,6 +4,11 @@
 
 import { spawn } from 'child_process'
 import { defineTool } from './types.js'
+import {
+  claimDirectToolCallBudget,
+  getSandboxToolBlockReason,
+  requireSandboxContext,
+} from '../utils/sandbox.js'
 
 export const BashTool = defineTool({
   name: 'Bash',
@@ -19,6 +24,10 @@ export const BashTool = defineTool({
         type: 'number',
         description: 'Optional timeout in milliseconds (max 600000, default 120000)',
       },
+      dangerouslyDisableSandbox: {
+        type: 'boolean',
+        description: 'Run the command without SDK sandbox protection. Requires sandbox.allowUnsandboxedCommands and host approval.',
+      },
     },
     required: ['command'],
   },
@@ -26,6 +35,51 @@ export const BashTool = defineTool({
   isConcurrencySafe: false,
   async call(input, context) {
     const { command, timeout: userTimeout } = input
+    const contextBlockReason = requireSandboxContext(context.sandbox, 'Bash')
+    if (contextBlockReason) {
+      return { data: contextBlockReason, is_error: true }
+    }
+    if (!context.__sdkInternalToolCall) {
+      const budgetBlockReason = claimDirectToolCallBudget(context.toolCallBudget, 'Bash')
+      if (budgetBlockReason) {
+        return { data: budgetBlockReason, is_error: true }
+      }
+    }
+
+    const sandboxBlockReason = getSandboxToolBlockReason('Bash', input, context.sandbox)
+    if (sandboxBlockReason) {
+      return { data: sandboxBlockReason, is_error: true }
+    }
+    let directPermissionAllowed = false
+    if (!context.__sdkInternalToolCall) {
+      if (!context.canUseTool) {
+        return {
+          data: 'Bash requires explicit host approval through context.canUseTool.',
+          is_error: true,
+        }
+      }
+      const permission = await context.canUseTool(BashTool, input)
+      if (permission.behavior === 'deny') {
+        return {
+          data: permission.message || 'Bash was denied by host approval.',
+          is_error: true,
+        }
+      }
+      directPermissionAllowed = true
+    }
+    if (
+      context.sandbox?.enabled &&
+      input.dangerouslyDisableSandbox === true &&
+      !directPermissionAllowed &&
+      (!context.canUseTool ||
+        (await context.canUseTool(BashTool, input)).behavior !== 'allow')
+    ) {
+      return {
+        data: 'Unsandboxed Bash requires explicit host approval for this tool_use.',
+        is_error: true,
+      }
+    }
+
     const timeoutMs = Math.min(userTimeout || 120000, 600000)
 
     return new Promise<string>((resolve) => {
