@@ -315,12 +315,15 @@ export class QueryEngine {
           }
         }
 
+        const message = err?.message ? String(err.message) : String(err)
+
         yield {
           type: 'result',
           subtype: 'error',
           usage: this.totalUsage,
           num_turns: this.turnCount,
           cost: this.totalCost,
+          errors: [message],
         }
         return
       }
