@@ -215,8 +215,13 @@ export class Agent {
       }
     }
 
-    // Resume or continue session
-    if (this.cfg.resume) {
+    // Resume or continue session. An explicitly supplied history wins: hosts
+    // that keep sessions in their own store (a database) pass it here and the
+    // session files are never read.
+    if (this.cfg.history?.length) {
+      this.history = [...this.cfg.history]
+      if (this.cfg.resume) this.sid = this.cfg.resume
+    } else if (this.cfg.resume) {
       const sessionData = await loadSession(this.cfg.resume)
       if (sessionData) {
         this.history = sessionData.messages

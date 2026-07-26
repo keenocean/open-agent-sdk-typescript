@@ -2,6 +2,8 @@
  * Core type definitions for the Agent SDK
  */
 
+import type { NormalizedMessageParam } from './providers/types.js'
+
 // Content block types (provider-agnostic, compatible with Anthropic format)
 export type ContentBlockParam =
   | { type: 'text'; text: string }
@@ -407,6 +409,14 @@ export interface AgentOptions {
   forkSession?: boolean
   /** Persist session to disk */
   persistSession?: boolean
+  /**
+   * Conversation history to start from, instead of loading it from disk.
+   *
+   * Lets a host keep sessions in its own store (a database, say) and stay
+   * stateless: pass the prior turns here with `persistSession: false` and the
+   * SDK never touches the session files. Takes precedence over `resume`.
+   */
+  history?: NormalizedMessageParam[]
   /** Explicit session ID */
   sessionId?: string
   /** Enable file checkpointing (for rewindFiles) */
