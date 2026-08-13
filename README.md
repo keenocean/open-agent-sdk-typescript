@@ -63,8 +63,8 @@ for await (const message of query({
 
 ### Token streaming
 
-OpenAI-compatible providers, including OpenRouter, can emit provider-level
-deltas when `includePartialMessages` is enabled:
+OpenAI-compatible providers (including OpenRouter) and the Anthropic Messages
+provider can emit provider-level deltas when `includePartialMessages` is enabled:
 
 ```typescript
 import { query } from "@codeany/open-agent-sdk";
@@ -82,10 +82,11 @@ for await (const message of query({
 }
 ```
 
-Text and tool-call fragments arrive as `partial_message` events. The SDK still
-emits one final `assistant` event with the complete normalized response for
-history, tool execution, and compatibility with existing consumers. Providers
-without streaming support continue to return only the final assistant event.
+Text, extended-thinking, and tool-call fragments arrive as `partial_message`
+events. The SDK still emits one final `assistant` event with the complete
+normalized response for history, tool execution, and compatibility with existing
+consumers. Providers without streaming support continue to return only the final
+assistant event.
 
 ### Simple blocking prompt
 

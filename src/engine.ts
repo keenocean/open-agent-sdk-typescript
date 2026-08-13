@@ -474,6 +474,17 @@ export class QueryEngine {
           continue
         }
 
+        if (event.type === 'thinking_delta') {
+          if (event.thinking) {
+            sawVisiblePartial = true
+            yield {
+              type: 'partial_message',
+              partial: { type: 'thinking', thinking: event.thinking },
+            }
+          }
+          continue
+        }
+
         sawVisiblePartial = true
         yield {
           type: 'partial_message',

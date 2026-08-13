@@ -45,6 +45,7 @@ test('emits partial text while retaining one complete assistant message', async 
       return finalResponse
     },
     async *streamMessage(): AsyncIterable<CreateMessageStreamEvent> {
+      yield { type: 'thinking_delta', thinking: 'Consider briefly. ' }
       yield { type: 'text_delta', text: 'Hello ' }
       yield { type: 'text_delta', text: 'world' }
       yield { type: 'message_stop', response: finalResponse }
@@ -57,6 +58,10 @@ test('emits partial text while retaining one complete assistant message', async 
   assert.deepEqual(
     events.filter((event) => event.type === 'partial_message'),
     [
+      {
+        type: 'partial_message',
+        partial: { type: 'thinking', thinking: 'Consider briefly. ' },
+      },
       { type: 'partial_message', partial: { type: 'text', text: 'Hello ' } },
       { type: 'partial_message', partial: { type: 'text', text: 'world' } },
     ],
