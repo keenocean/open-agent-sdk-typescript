@@ -1,18 +1,17 @@
 {
-  "name": "@codeany/open-agent-sdk",
+  "name": "@keenocean/open-agent-sdk",
   "author": {
-    "name": "CodeAny",
-    "url": "https://codeany.ai"
+    "name": "Keenocean"
   },
-  "homepage": "https://github.com/codeany-ai/open-agent-sdk-typescript",
+  "homepage": "https://github.com/keenocean/open-agent-sdk-typescript",
   "repository": {
     "type": "git",
-    "url": "https://github.com/codeany-ai/open-agent-sdk-typescript.git"
+    "url": "https://github.com/keenocean/open-agent-sdk-typescript.git"
   },
   "bugs": {
-    "url": "https://github.com/codeany-ai/open-agent-sdk-typescript/issues"
+    "url": "https://github.com/keenocean/open-agent-sdk-typescript/issues"
   },
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Open-source Agent SDK. Runs the full agent loop in-process — no local CLI required. Deploy anywhere: cloud, serverless, Docker, CI/CD.",
   "type": "module",
   "main": "./dist/index.js",
@@ -22,6 +21,9 @@
     "README.md",
     "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -41,7 +43,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.52.0",
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^3.23.0",
     "zod-to-json-schema": "^3.24.0"
   },
@@ -52,7 +54,7 @@
   },
   "keywords": [
     "open-agent-sdk",
-    "codeany",
+    "keenocean",
     "agent",
     "sdk",
     "ai",

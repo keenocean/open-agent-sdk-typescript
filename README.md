@@ -1,6 +1,6 @@
 # Open Agent SDK (TypeScript)
 
-[![npm version](https://img.shields.io/npm/v/@codeany/open-agent-sdk)](https://www.npmjs.com/package/@codeany/open-agent-sdk)
+[![npm version](https://img.shields.io/npm/v/@keenocean/open-agent-sdk)](https://www.npmjs.com/package/@keenocean/open-agent-sdk)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 
@@ -11,7 +11,7 @@ Also available in **Go**: [open-agent-sdk-go](https://github.com/codeany-ai/open
 ## Get started
 
 ```bash
-npm install @codeany/open-agent-sdk
+npm install @keenocean/open-agent-sdk
 ```
 
 Set your API key:
@@ -44,7 +44,7 @@ export CODEANY_MODEL=anthropic/claude-sonnet-4
 ### One-shot query (streaming)
 
 ```typescript
-import { query } from "@codeany/open-agent-sdk";
+import { query } from "@keenocean/open-agent-sdk";
 
 for await (const message of query({
   prompt: "Read package.json and tell me the project name.",
@@ -67,7 +67,7 @@ OpenAI-compatible providers (including OpenRouter) and the Anthropic Messages
 provider can emit provider-level deltas when `includePartialMessages` is enabled:
 
 ```typescript
-import { query } from "@codeany/open-agent-sdk";
+import { query } from "@keenocean/open-agent-sdk";
 
 for await (const message of query({
   prompt: "Write a short haiku.",
@@ -91,7 +91,7 @@ assistant event.
 ### Simple blocking prompt
 
 ```typescript
-import { createAgent } from "@codeany/open-agent-sdk";
+import { createAgent } from "@keenocean/open-agent-sdk";
 
 const agent = createAgent({ model: "claude-sonnet-4-6" });
 const result = await agent.prompt("What files are in this project?");
@@ -105,7 +105,7 @@ console.log(
 ### OpenAI / GPT models
 
 ```typescript
-import { createAgent } from "@codeany/open-agent-sdk";
+import { createAgent } from "@keenocean/open-agent-sdk";
 
 const agent = createAgent({
   apiType: "openai-completions",
@@ -123,7 +123,7 @@ The `apiType` is auto-detected from model name — models containing `gpt-`, `o1
 ### Multi-turn conversation
 
 ```typescript
-import { createAgent } from "@codeany/open-agent-sdk";
+import { createAgent } from "@keenocean/open-agent-sdk";
 
 const agent = createAgent({ maxTurns: 5 });
 
@@ -142,7 +142,7 @@ console.log(`Session messages: ${agent.getMessages().length}`);
 
 ```typescript
 import { z } from "zod";
-import { query, tool, createSdkMcpServer } from "@codeany/open-agent-sdk";
+import { query, tool, createSdkMcpServer } from "@keenocean/open-agent-sdk";
 
 const getWeather = tool(
   "get_weather",
@@ -171,7 +171,7 @@ import {
   createAgent,
   getAllBaseTools,
   defineTool,
-} from "@codeany/open-agent-sdk";
+} from "@keenocean/open-agent-sdk";
 
 const calculator = defineTool({
   name: "Calculator",
@@ -202,7 +202,7 @@ import {
   createAgent,
   registerSkill,
   getAllSkills,
-} from "@codeany/open-agent-sdk";
+} from "@keenocean/open-agent-sdk";
 
 // Register a custom skill
 registerSkill({
@@ -230,7 +230,7 @@ console.log(result.text);
 ### Hooks (lifecycle events)
 
 ```typescript
-import { createAgent, createHookRegistry } from "@codeany/open-agent-sdk";
+import { createAgent, createHookRegistry } from "@keenocean/open-agent-sdk";
 
 const hooks = createHookRegistry({
   PreToolUse: [
@@ -256,7 +256,7 @@ const hooks = createHookRegistry({
 ### MCP server integration
 
 ```typescript
-import { createAgent } from "@codeany/open-agent-sdk";
+import { createAgent } from "@keenocean/open-agent-sdk";
 
 const agent = createAgent({
   mcpServers: {
@@ -275,7 +275,7 @@ await agent.close();
 ### Subagents
 
 ```typescript
-import { query } from "@codeany/open-agent-sdk";
+import { query } from "@keenocean/open-agent-sdk";
 
 for await (const msg of query({
   prompt: "Use the code-reviewer agent to review src/index.ts",
@@ -296,7 +296,7 @@ for await (const msg of query({
 ### Permissions
 
 ```typescript
-import { query } from "@codeany/open-agent-sdk";
+import { query } from "@keenocean/open-agent-sdk";
 
 // Read-only agent — can only analyze, not modify
 for await (const msg of query({
@@ -443,7 +443,7 @@ Register custom skills with `registerSkill()`.
 ┌──────────────────────────────────────────────────────┐
 │                   Your Application                    │
 │                                                       │
-│   import { createAgent } from '@codeany/open-agent-sdk' │
+│import { createAgent } from '@keenocean/open-agent-sdk'│
 └────────────────────────┬─────────────────────────────┘
                          │
               ┌──────────▼──────────┐
@@ -516,11 +516,11 @@ npx tsx examples/web/server.ts
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=codeany-ai%2Fopen-agent-sdk-typescript&type=timeline&legend=top-left">
+<a href="https://www.star-history.com/?repos=keenocean%2Fopen-agent-sdk-typescript&type=timeline&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=codeany-ai/open-agent-sdk-typescript&type=timeline&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=codeany-ai/open-agent-sdk-typescript&type=timeline&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=codeany-ai/open-agent-sdk-typescript&type=timeline&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=keenocean/open-agent-sdk-typescript&type=timeline&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=keenocean/open-agent-sdk-typescript&type=timeline&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=keenocean/open-agent-sdk-typescript&type=timeline&legend=top-left" />
  </picture>
 </a>
 
