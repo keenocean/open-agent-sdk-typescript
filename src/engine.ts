@@ -22,6 +22,7 @@ import type {
 } from './types.js'
 import type {
   LLMProvider,
+  CreateMessageParams,
   CreateMessageResponse,
   NormalizedMessageParam,
   NormalizedTool,
@@ -270,31 +271,29 @@ export class QueryEngine {
       this.turnCount++
       turnsRemaining--
 
-      // Make API call with retry via provider
+      const request: CreateMessageParams = {
+        model: this.config.model,
+        maxTokens: this.config.maxTokens,
+        system: systemPrompt,
+        messages: apiMessages,
+        tools: tools.length > 0 ? tools : undefined,
+        thinking:
+          this.config.thinking?.type === 'enabled' &&
+          this.config.thinking.budgetTokens
+            ? {
+                type: 'enabled',
+                budget_tokens: this.config.thinking.budgetTokens,
+              }
+            : undefined,
+        abortSignal: this.config.abortSignal,
+      }
+
+      // Stream partials when requested, while retaining the complete response
+      // for history, accounting and tool execution.
       let response: CreateMessageResponse
       const apiStart = performance.now()
       try {
-        response = await withRetry(
-          async () => {
-            return this.provider.createMessage({
-              model: this.config.model,
-              maxTokens: this.config.maxTokens,
-              system: systemPrompt,
-              messages: apiMessages,
-              tools: tools.length > 0 ? tools : undefined,
-              thinking:
-                this.config.thinking?.type === 'enabled' &&
-                this.config.thinking.budgetTokens
-                  ? {
-                      type: 'enabled',
-                      budget_tokens: this.config.thinking.budgetTokens,
-                    }
-                  : undefined,
-            })
-          },
-          undefined,
-          this.config.abortSignal,
-        )
+        response = yield* this.createMessageWithOptionalPartials(request)
       } catch (err: any) {
         // Handle prompt-too-long by compacting
         if (isPromptTooLongError(err) && !this.compactState.compacted) {
@@ -446,6 +445,65 @@ export class QueryEngine {
       model_usage: { [this.config.model]: { input_tokens: this.totalUsage.input_tokens, output_tokens: this.totalUsage.output_tokens } },
       cost: this.totalCost,
     }
+  }
+
+  private async *createMessageWithOptionalPartials(
+    request: CreateMessageParams,
+  ): AsyncGenerator<SDKMessage, CreateMessageResponse> {
+    if (!this.config.includePartialMessages || !this.provider.streamMessage) {
+      return await withRetry(
+        () => this.provider.createMessage(request),
+        undefined,
+        this.config.abortSignal,
+      )
+    }
+
+    let sawVisiblePartial = false
+    try {
+      for await (const event of this.provider.streamMessage(request)) {
+        if (event.type === 'message_stop') return event.response
+
+        if (event.type === 'text_delta') {
+          if (event.text) {
+            sawVisiblePartial = true
+            yield {
+              type: 'partial_message',
+              partial: { type: 'text', text: event.text },
+            }
+          }
+          continue
+        }
+
+        sawVisiblePartial = true
+        yield {
+          type: 'partial_message',
+          partial: {
+            type: 'tool_use',
+            id: event.id,
+            name: event.name,
+            input: event.input,
+          },
+        }
+      }
+    } catch (error) {
+      // A retry after a visible delta would duplicate user-visible content.
+      if (sawVisiblePartial) throw error
+      return await withRetry(
+        () => this.provider.createMessage(request),
+        undefined,
+        this.config.abortSignal,
+      )
+    }
+
+    if (sawVisiblePartial) {
+      throw new Error('Provider stream ended without a final response')
+    }
+
+    return await withRetry(
+      () => this.provider.createMessage(request),
+      undefined,
+      this.config.abortSignal,
+    )
   }
 
   /**

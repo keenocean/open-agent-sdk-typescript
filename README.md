@@ -61,6 +61,32 @@ for await (const message of query({
 }
 ```
 
+### Token streaming
+
+OpenAI-compatible providers, including OpenRouter, can emit provider-level
+deltas when `includePartialMessages` is enabled:
+
+```typescript
+import { query } from "@codeany/open-agent-sdk";
+
+for await (const message of query({
+  prompt: "Write a short haiku.",
+  options: {
+    apiType: "openai-completions",
+    includePartialMessages: true,
+  },
+})) {
+  if (message.type === "partial_message" && message.partial.type === "text") {
+    process.stdout.write(message.partial.text ?? "");
+  }
+}
+```
+
+Text and tool-call fragments arrive as `partial_message` events. The SDK still
+emits one final `assistant` event with the complete normalized response for
+history, tool execution, and compatibility with existing consumers. Providers
+without streaming support continue to return only the final assistant event.
+
 ### Simple blocking prompt
 
 ```typescript
@@ -341,6 +367,7 @@ npx tsx examples/web/server.ts
 | `disallowedTools`    | `string[]`                              | —                      | Tool deny-list                                                       |
 | `permissionMode`     | `string`                                | `bypassPermissions`    | `default` / `acceptEdits` / `dontAsk` / `bypassPermissions` / `plan` |
 | `canUseTool`         | `function`                              | —                      | Custom permission callback                                           |
+| `includePartialMessages` | `boolean`                           | `false`                | Emit provider token and tool-call deltas when supported              |
 | `maxTurns`           | `number`                                | `10`                   | Max agentic turns                                                    |
 | `maxBudgetUsd`       | `number`                                | —                      | Spending cap                                                         |
 | `thinking`           | `ThinkingConfig`                        | `{ type: 'adaptive' }` | Extended thinking                                                    |
