@@ -25,6 +25,7 @@ export interface CreateMessageParams {
   messages: NormalizedMessageParam[]
   tools?: NormalizedTool[]
   thinking?: { type: string; budget_tokens?: number }
+  abortSignal?: AbortSignal
 }
 
 /**
@@ -41,7 +42,8 @@ export type NormalizedContentBlock =
   | { type: 'tool_use'; id: string; name: string; input: any }
   | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
   | { type: 'image'; source: any }
-  | { type: 'thinking'; thinking: string }
+  | { type: 'thinking'; thinking: string; signature?: string }
+  | { type: 'redacted_thinking'; data: string }
 
 export interface NormalizedTool {
   name: string
@@ -71,6 +73,14 @@ export interface CreateMessageResponse {
 export type NormalizedResponseBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: any }
+  | { type: 'thinking'; thinking: string; signature?: string }
+  | { type: 'redacted_thinking'; data: string }
+
+export type CreateMessageStreamEvent =
+  | { type: 'text_delta'; text: string }
+  | { type: 'thinking_delta'; thinking: string }
+  | { type: 'tool_use_delta'; id?: string; name?: string; input?: string }
+  | { type: 'message_stop'; response: CreateMessageResponse }
 
 // --------------------------------------------------------------------------
 // Provider Interface
@@ -82,4 +92,9 @@ export interface LLMProvider {
 
   /** Send a message and get a response. */
   createMessage(params: CreateMessageParams): Promise<CreateMessageResponse>
+
+  /** Stream a message response. Providers may omit this and use createMessage. */
+  streamMessage?(
+    params: CreateMessageParams,
+  ): AsyncIterable<CreateMessageStreamEvent>
 }

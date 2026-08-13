@@ -10,7 +10,44 @@ import type {
   LLMProvider,
   CreateMessageParams,
   CreateMessageResponse,
+  CreateMessageStreamEvent,
 } from './types.js'
+
+function toRequestParams(
+  params: CreateMessageParams,
+): Anthropic.MessageStreamParams {
+  const requestParams: Anthropic.MessageStreamParams = {
+    model: params.model,
+    max_tokens: params.maxTokens,
+    system: params.system,
+    messages: params.messages as Anthropic.MessageParam[],
+    tools: params.tools ? (params.tools as Anthropic.Tool[]) : undefined,
+  }
+
+  if (params.thinking?.type === 'enabled' && params.thinking.budget_tokens) {
+    requestParams.thinking = {
+      type: 'enabled',
+      budget_tokens: params.thinking.budget_tokens,
+    }
+  }
+
+  return requestParams
+}
+
+function toResponse(response: Anthropic.Message): CreateMessageResponse {
+  return {
+    content: response.content as CreateMessageResponse['content'],
+    stopReason: response.stop_reason || 'end_turn',
+    usage: {
+      input_tokens: response.usage.input_tokens,
+      output_tokens: response.usage.output_tokens,
+      cache_creation_input_tokens:
+        response.usage.cache_creation_input_tokens ?? undefined,
+      cache_read_input_tokens:
+        response.usage.cache_read_input_tokens ?? undefined,
+    },
+  }
+}
 
 export class AnthropicProvider implements LLMProvider {
   readonly apiType = 'anthropic-messages' as const
@@ -24,37 +61,56 @@ export class AnthropicProvider implements LLMProvider {
   }
 
   async createMessage(params: CreateMessageParams): Promise<CreateMessageResponse> {
-    const requestParams: Anthropic.MessageCreateParamsNonStreaming = {
-      model: params.model,
-      max_tokens: params.maxTokens,
-      system: params.system,
-      messages: params.messages as Anthropic.MessageParam[],
-      tools: params.tools
-        ? (params.tools as Anthropic.Tool[])
-        : undefined,
-    }
+    const response = await this.client.messages.create(
+      toRequestParams(params) as Anthropic.MessageCreateParamsNonStreaming,
+      params.abortSignal ? { signal: params.abortSignal } : undefined,
+    )
 
-    // Add extended thinking if configured
-    if (params.thinking?.type === 'enabled' && params.thinking.budget_tokens) {
-      (requestParams as any).thinking = {
-        type: 'enabled',
-        budget_tokens: params.thinking.budget_tokens,
+    return toResponse(response)
+  }
+
+  async *streamMessage(
+    params: CreateMessageParams,
+  ): AsyncIterable<CreateMessageStreamEvent> {
+    const stream = this.client.messages.stream(
+      toRequestParams(params),
+      params.abortSignal ? { signal: params.abortSignal } : undefined,
+    )
+    const toolBlocks = new Map<number, { id: string; name: string }>()
+
+    for await (const event of stream) {
+      if (event.type === 'content_block_start') {
+        const block = event.content_block
+        if (block.type === 'tool_use') {
+          const tool = { id: block.id, name: block.name }
+          toolBlocks.set(event.index, tool)
+          yield { type: 'tool_use_delta', ...tool }
+        } else if (block.type === 'text' && block.text) {
+          yield { type: 'text_delta', text: block.text }
+        } else if (block.type === 'thinking' && block.thinking) {
+          yield { type: 'thinking_delta', thinking: block.thinking }
+        }
+        continue
+      }
+
+      if (event.type !== 'content_block_delta') continue
+
+      const delta = event.delta
+      if (delta.type === 'text_delta') {
+        if (delta.text) yield { type: 'text_delta', text: delta.text }
+      } else if (delta.type === 'thinking_delta') {
+        if (delta.thinking) {
+          yield { type: 'thinking_delta', thinking: delta.thinking }
+        }
+      } else if (delta.type === 'input_json_delta' && delta.partial_json) {
+        yield {
+          type: 'tool_use_delta',
+          ...toolBlocks.get(event.index),
+          input: delta.partial_json,
+        }
       }
     }
 
-    const response = await this.client.messages.create(requestParams)
-
-    return {
-      content: response.content as CreateMessageResponse['content'],
-      stopReason: response.stop_reason || 'end_turn',
-      usage: {
-        input_tokens: response.usage.input_tokens,
-        output_tokens: response.usage.output_tokens,
-        cache_creation_input_tokens:
-          (response.usage as any).cache_creation_input_tokens,
-        cache_read_input_tokens:
-          (response.usage as any).cache_read_input_tokens,
-      },
-    }
+    yield { type: 'message_stop', response: toResponse(await stream.finalMessage()) }
   }
 }

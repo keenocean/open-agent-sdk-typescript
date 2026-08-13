@@ -65,6 +65,7 @@ export type {
   LLMProvider,
   CreateMessageParams,
   CreateMessageResponse,
+  CreateMessageStreamEvent,
   NormalizedMessageParam,
   NormalizedContentBlock,
   NormalizedTool,

@@ -14,7 +14,8 @@ export type ContentBlockParam =
 export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: any }
-  | { type: 'thinking'; thinking: string }
+  | { type: 'thinking'; thinking: string; signature?: string }
+  | { type: 'redacted_thinking'; data: string }
 
 // --------------------------------------------------------------------------
 // Message Types
@@ -107,8 +108,10 @@ export interface SDKResultMessage {
 export interface SDKPartialMessage {
   type: 'partial_message'
   partial: {
-    type: 'text' | 'tool_use'
+    type: 'text' | 'tool_use' | 'thinking'
+    id?: string
     text?: string
+    thinking?: string
     name?: string
     input?: string
   }
